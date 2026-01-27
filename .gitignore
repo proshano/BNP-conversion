@@ -1,0 +1,8 @@
+# Patient data (do not commit)
+*.csv
+*.xlsx
+*.docx
+# Local OS and RStudio artifacts
+.DS_Store
+.Rhistory
+.Rproj.user/
