@@ -13,7 +13,7 @@ CONFIG <- list(
   binary_threshold = 300, # NT-proBNP threshold for binary metrics
   class_breaks = c(100, 200, 1500), # NT-proBNP thresholds for multi-class metrics
   rcs_knots = 3, # Number of knots for restricted cubic splines
-  bootstrap_reps = 100, # Set to 1000 for protocol-level bootstrapping
+  bootstrap_reps = 80, # Set to 1000 for protocol-level bootstrapping
   bootstrap_cores = 8, # Multicore bootstrapping
   kasahara_crcl_knots = c(56.5, 72.4, 93.7), # Knots from Kasahara paper
   log_bnp_interval = log(c(1, 50000)), # Interval for root finding
@@ -385,28 +385,29 @@ compute_metrics <- function(
   if (!is.null(paba_model) && is_mcr_result(paba_model)) {
     paba_results_para <- paba_model@para
     paba_m <- tibble(
-      .metric = c("paba_intercept", "paba_slope"),
+      .metric = c(
+        "paba_intercept",
+        "paba_intercept_lower",
+        "paba_intercept_upper",
+        "paba_slope",
+        "paba_slope_lower",
+        "paba_slope_upper"
+      ),
       .estimator = "PaBa",
       .estimate = c(
-        paba_results_para["Intercept", "EST"],
-        paba_results_para["Slope", "EST"]
-      ),
-      ci_lower = c(
-        paba_results_para["Intercept", "LCI"],
-        paba_results_para["Slope", "LCI"]
-      ),
-      ci_upper = c(
-        paba_results_para["Intercept", "UCI"],
-        paba_results_para["Slope", "UCI"]
+        paba_results_para[1, "EST"],
+        paba_results_para[1, "LCI"],
+        paba_results_para[1, "UCI"],
+        paba_results_para[2, "EST"],
+        paba_results_para[2, "LCI"],
+        paba_results_para[2, "UCI"]
       )
     )
   } else {
     paba_m <- tibble(
       .metric = character(),
       .estimator = character(),
-      .estimate = numeric(),
-      ci_lower = numeric(),
-      ci_upper = numeric()
+      .estimate = numeric()
     )
     warning("Passing-Bablok regression failed or insufficient data.")
   }
@@ -955,50 +956,6 @@ plot_mcreg <- function(mcreg_obj, filename, title) {
     )
   }
 }
-format_modelsummary_flextable <- function(ft, digits = 2) {
-  if (!inherits(ft, "flextable")) {
-    return(ft)
-  }
-  if (is.null(ft$body$dataset) || nrow(ft$body$dataset) == 0) {
-    return(ft)
-  }
-  df <- ft$body$dataset
-  if (ncol(df) < 2) {
-    return(ft)
-  }
-  term_col <- names(df)[1]
-  model_cols <- names(df)[-1]
-  estimate_rows <- !is.na(df[[term_col]]) & nzchar(df[[term_col]])
-  if (!any(estimate_rows)) {
-    return(ft)
-  }
-  pattern <- "[-+]?(?:\\d*\\.\\d+|\\d+)(?:[eE][-+]?\\d+)?"
-  format_cell <- function(x) {
-    if (is.na(x) || !nzchar(x)) {
-      return(x)
-    }
-    matches <- regmatches(x, gregexpr(pattern, x, perl = TRUE))[[1]]
-    if (length(matches) == 0) {
-      return(x)
-    }
-    formatted <- vapply(
-      matches,
-      function(val) formatC(as.numeric(val), format = "f", digits = digits),
-      character(1)
-    )
-    out <- x
-    for (i in seq_along(matches)) {
-      out <- sub(pattern, formatted[i], out, perl = TRUE)
-    }
-    out
-  }
-  df[estimate_rows, model_cols] <- lapply(
-    df[estimate_rows, model_cols, drop = FALSE],
-    function(col) vapply(col, format_cell, character(1))
-  )
-  ft$body$dataset <- df
-  ft
-}
 #===============================================================================
 # Section 1: Data Loading and Preparation
 #===============================================================================
@@ -1212,6 +1169,7 @@ table1_vars <- c(
   # Comorbidities
   "AF",
   "CAD",
+  "MI",
   "ACS",
   "CCSC_lll",
   "CCSC_lV",
@@ -1220,8 +1178,8 @@ table1_vars <- c(
   "revascularization_6",
   "revascularization",
   "PVD",
-  "stroke", # used to derive combined Stroke/TIA variable
-  "tia", # used to derive combined Stroke/TIA variable
+  "stroke",
+  "tia",
   "copd",
   "cancer",
   "chf",
@@ -1246,7 +1204,7 @@ table1_vars <- c(
 # Select available variables FROM THE RAW CLEANED DATA
 available_table1_vars <- intersect(table1_vars, names(analysis_data_raw))
 print(glue(
-  "Columns pulled for Table 1 (from initial data): {paste(available_table1_vars, collapse=', ')}"
+  "Columns available for Table 1 (from initial data): {paste(available_table1_vars, collapse=', ')}"
 ))
 print(glue(
   "Total patients in initial dataset for Table 1: {nrow(analysis_data_raw)}"
@@ -1255,20 +1213,14 @@ print(glue(
 
 # Prepare data for gtsummary using the initial cleaned data
 data_for_table1 <- analysis_data_raw %>%
-  select(StudyID, all_of(available_table1_vars))
-if (!"stroke" %in% names(data_for_table1)) {
-  data_for_table1$stroke <- NA_real_
-}
-if (!"tia" %in% names(data_for_table1)) {
-  data_for_table1$tia <- NA_real_
-}
-data_for_table1 <- data_for_table1 %>%
+  select(StudyID, all_of(available_table1_vars)) %>%
   mutate(
     # Convert relevant comorbidities to factors
     across(
       any_of(c(
         "AF",
         "CAD",
+        "MI",
         "ACS",
         "CCSC_lll",
         "CCSC_lV",
@@ -1291,12 +1243,6 @@ data_for_table1 <- data_for_table1 %>%
       )),
       ~ factor(., levels = c(0, 1), labels = c("No", "Yes"))
     ),
-    stroke_tia = case_when(
-      is.na(stroke) & is.na(tia) ~ NA_character_,
-      stroke == "Yes" | tia == "Yes" ~ "Yes",
-      stroke == "No" & tia == "No" ~ "No",
-      TRUE ~ NA_character_
-    ) %>% factor(levels = c("No", "Yes")),
     Sex = factor(Sex, levels = c("F", "M")),
     SurgeryCategory = case_when(
       if ("Major_VascS" %in% names(.)) Major_VascS == 1 ~ "Major Vascular",
@@ -1324,8 +1270,10 @@ data_for_table1 <- data_for_table1 %>%
     any_of(c(
       "AF",
       "CAD",
+      "MI",
       "PVD",
-      "stroke_tia",
+      "stroke",
+      "tia",
       "copd",
       "cancer",
       "chf",
@@ -1348,8 +1296,10 @@ var_labels_list <- list(
   NTproBNP = "NT-proBNP (pg/mL)",
   AF = "Atrial Fibrillation",
   CAD = "Coronary Artery Disease",
+  MI = "Myocardial Infarction History",
   PVD = "Peripheral Vascular Disease",
-  stroke_tia = "Stroke or TIA History",
+  stroke = "Stroke History",
+  tia = "TIA History",
   copd = "COPD",
   cancer = "Cancer History",
   chf = "Congestive Heart Failure History",
@@ -1415,12 +1365,12 @@ tryCatch(
           all_categorical() ~ "{n} ({p}%)"
         ),
         digits = list(
-          all_continuous() ~ 2,
+          all_continuous() ~ 1,
           all_of(intersect(c("BNP", "NTproBNP"), names(data_for_table1))) ~ c(
-            2,
-            2
+            0,
+            0
           ),
-          all_categorical() ~ c(0, 2)
+          all_categorical() ~ c(0, 1)
         ),
         type = list(
           all_continuous() ~ "continuous",
@@ -1526,75 +1476,6 @@ if (n_eval_kasahara > 10) {
     x_col = NTproBNP,
     y_col = pred_ntprobnp_kasahara
   )
-
-  # --- Simple Linear Recalibration (Original Scale) ---
-  print("Running simple linear recalibration (NTproBNP ~ Predicted Kasahara)...")
-  cal_simple_fit <- lm(
-    NTproBNP ~ pred_ntprobnp_kasahara,
-    data = data_eval_kasahara
-  )
-  kasahara_simple_intercept <- coef(cal_simple_fit)[1]
-  kasahara_simple_slope <- coef(cal_simple_fit)[2]
-  kasahara_simple_summary <- tibble(
-    intercept = kasahara_simple_intercept,
-    slope = kasahara_simple_slope,
-    n = nrow(data_eval_kasahara)
-  )
-  write_csv(
-    kasahara_simple_summary,
-    output_path("kasahara_simple_recalibration.csv")
-  )
-  print("Kasahara simple recalibration coefficients (original scale):")
-  print(kasahara_simple_summary)
-
-  # Add simple recalibrated predictions to datasets
-  analysis_data_raw <- analysis_data_raw %>%
-    mutate(
-      pred_ntprobnp_kasahara_recal_simple = ifelse(
-        is.finite(pred_ntprobnp_kasahara),
-        kasahara_simple_intercept +
-          kasahara_simple_slope * pred_ntprobnp_kasahara,
-        NA_real_
-      ),
-      pred_ntprobnp_kasahara_recal_simple = ifelse(
-        is.finite(pred_ntprobnp_kasahara_recal_simple) &
-          pred_ntprobnp_kasahara_recal_simple > 0,
-        pred_ntprobnp_kasahara_recal_simple,
-        NA_real_
-      )
-    )
-  data_eval_kasahara <- data_eval_kasahara %>%
-    mutate(
-      pred_ntprobnp_kasahara_recal_simple = ifelse(
-        is.finite(pred_ntprobnp_kasahara),
-        kasahara_simple_intercept +
-          kasahara_simple_slope * pred_ntprobnp_kasahara,
-        NA_real_
-      ),
-      pred_ntprobnp_kasahara_recal_simple = ifelse(
-        is.finite(pred_ntprobnp_kasahara_recal_simple) &
-          pred_ntprobnp_kasahara_recal_simple > 0,
-        pred_ntprobnp_kasahara_recal_simple,
-        NA_real_
-      )
-    )
-
-  # Evaluate simple recalibrated Kasahara predictions
-  old_model_errors_recal_simple <- compute_metrics(
-    data_eval_kasahara,
-    target_col = "NTproBNP",
-    predicted_col = "pred_ntprobnp_kasahara_recal_simple"
-  )
-  write_rds(
-    old_model_errors_recal_simple,
-    output_path('kasahara_model_prediction_errors_recal_simple.rds')
-  )
-  write_csv(
-    old_model_errors_recal_simple,
-    output_path('kasahara_model_prediction_errors_recal_simple.csv')
-  )
-  print("Kasahara (Simple Recalibrated) model performance metrics:")
-  print(old_model_errors_recal_simple)
 
   # --- Log-Log Calibration (Kasahara): OLS + Passing-Bablok ---
   loglog_data <- data_eval_kasahara %>%
@@ -2023,7 +1904,7 @@ ols_loglog_fit <- lm(log_ntprobnp ~ log_pred_initial, data = md)
 I_log_ols <- coef(ols_loglog_fit)[1]
 S_log_ols <- coef(ols_loglog_fit)[2]
 print(glue(
-  "OLS log-log recalibration: I={sprintf('%.2f', I_log_ols)}, S={sprintf('%.2f', S_log_ols)}"
+  "OLS log-log recalibration: I={round(I_log_ols, 4)}, S={round(S_log_ols, 4)}"
 ))
 
 print("Running Log-Log Passing-Bablok recalibration...")
@@ -2097,13 +1978,13 @@ if (nrow(paba_loglog_boot) > 10) {
       paba_loglog_boot_summary$term == "Slope"
     ]
     print(glue(
-      "Using bootstrapped median for PaBa recalibration: I={sprintf('%.2f', I_log_paba)}, S={sprintf('%.2f', S_log_paba)}"
+      "Using bootstrapped median for PaBa recalibration: I={round(I_log_paba, 4)}, S={round(S_log_paba, 4)}"
     ))
   } else {
     I_log_paba <- I_log_full
     S_log_paba <- S_log_full
     print(glue(
-      "Using full-sample PaBa for recalibration: I={sprintf('%.2f', I_log_paba)}, S={sprintf('%.2f', S_log_paba)}"
+      "Using full-sample PaBa for recalibration: I={round(I_log_paba, 4)}, S={round(S_log_paba, 4)}"
     ))
   }
 } else {
@@ -2603,11 +2484,36 @@ if (nrow(logit_md) < 30) {
     output = "flextable",
     title = 'Table A: Association between Measured NT-proBNP Categories and Composite Outcome (Odds Ratios)'
   )
-  table_a <- format_modelsummary_flextable(table_a, digits = 2)
   print(table_a)
   save_as_docx(
     table_a,
     path = output_path("outcome_table_A_ntprobnp_cat.docx")
+  )
+
+  # Model B: Derived BNP categories vs. Outcome
+  model_b_glm <- glm(
+    composite_outcome ~ BNP_cat_derived,
+    data = logit_md,
+    family = binomial
+  )
+  model_b_firth <- logistf(
+    composite_outcome ~ BNP_cat_derived,
+    data = logit_md,
+    pl = FALSE
+  )
+  table_b <- modelsummary(
+    list('GLM' = model_b_glm, 'Firth GLM' = model_b_firth),
+    estimate = "{estimate} [{conf.low}, {conf.high}]",
+    statistic = "p.value",
+    exponentiate = TRUE,
+    gof_map = NA,
+    output = "flextable",
+    title = 'Table B: Association between Derived BNP Categories (New Model) and Composite Outcome (Odds Ratios)'
+  )
+  print(table_b)
+  save_as_docx(
+    table_b,
+    path = output_path("outcome_table_B_bnp_derived_cat.docx")
   )
 
   # Model C: Predicted (Recalibrated Median, PaBa) NT-proBNP categories vs. Outcome
@@ -2630,7 +2536,6 @@ if (nrow(logit_md) < 30) {
     output = "flextable",
     title = 'Table C: Association between Predicted NT-proBNP Categories (New Model - Median, PaBa) and Composite Outcome (Odds Ratios)'
   )
-  table_c <- format_modelsummary_flextable(table_c, digits = 2)
   print(table_c)
   save_as_docx(
     table_c,
@@ -2815,8 +2720,6 @@ report_lines <- c(
   "  library(flextable)",
   "})",
   "dir.create(params$output_dir, showWarnings = FALSE, recursive = TRUE)",
-  sprintf("binary_threshold <- %s", CONFIG$binary_threshold),
-  sprintf("class_breaks <- c(%s)", paste(CONFIG$class_breaks, collapse = ", ")),
   "get_obj <- function(name) {",
   "  if (exists(name, envir = knitr::knit_global())) {",
   "    get(name, envir = knitr::knit_global())",
@@ -2824,103 +2727,19 @@ report_lines <- c(
   "    NULL",
   "  }",
   "}",
-  "format_table <- function(df, caption, digits = 2, p_digits = 3, font_size = 9, drop_model_type = TRUE) {",
+  "format_table <- function(df, caption, digits = 3, font_size = 9, drop_model_type = TRUE) {",
   "  if (drop_model_type && 'model_type' %in% names(df)) {",
   "    df <- dplyr::select(df, -model_type)",
   "  }",
-  "  if (all(c('.estimate', 'ci_lower', 'ci_upper') %in% names(df))) {",
-  "    df <- df %>%",
-  "      dplyr::mutate(",
-  "        estimate_ci = ifelse(",
-  "          is.finite(ci_lower) & is.finite(ci_upper),",
-  "          sprintf(paste0('%.', digits, 'f [%.', digits, 'f, %.', digits, 'f]'), .estimate, ci_lower, ci_upper),",
-  "          sprintf(paste0('%.', digits, 'f'), .estimate)",
-  "        )",
-  "      ) %>%",
-  "      dplyr::select(-.estimate, -ci_lower, -ci_upper) %>%",
-  "      dplyr::rename(.estimate = estimate_ci)",
-  "  }",
   "  df <- df %>%",
   "    dplyr::rename_with(~ gsub('^\\\\.', '', .x)) %>%",
-  "    dplyr::rename_with(~ gsub('_', ' ', .x))",
-  "  num_cols <- names(df)[vapply(df, is.numeric, logical(1))]",
-  "  name_lower <- tolower(names(df))",
-  "  p_cols <- names(df)[grepl('p\\\\.value|p value|p-value|pvalue', name_lower)]",
-  "  count_cols <- names(df)[grepl('(^n\\\\b)|\\\\bnobs\\\\b|\\\\bn obs\\\\b|\\\\bcount\\\\b|\\\\bnumber\\\\b|\\\\bsubjects\\\\b|\\\\bpatients\\\\b|\\\\bsample size\\\\b', name_lower)]",
-  "  p_cols <- intersect(p_cols, num_cols)",
-  "  count_cols <- intersect(count_cols, num_cols)",
-  "  num_cols_main <- setdiff(num_cols, union(p_cols, count_cols))",
+  "    dplyr::rename_with(~ gsub('_', ' ', .x)) %>%",
+  "    dplyr::mutate(dplyr::across(where(is.numeric), ~ round(.x, digits)))",
   "  ft <- flextable::flextable(df)",
-  "  if (length(num_cols_main) > 0) {",
-  "    ft <- flextable::colformat_double(ft, j = num_cols_main, digits = digits)",
-  "  }",
-  "  if (length(p_cols) > 0) {",
-  "    ft <- flextable::colformat_double(ft, j = p_cols, digits = p_digits)",
-  "  }",
-  "  if (length(count_cols) > 0) {",
-  "    ft <- flextable::colformat_int(ft, j = count_cols)",
-  "  }",
   "  ft <- flextable::set_caption(ft, caption = caption)",
   "  ft <- flextable::fontsize(ft, size = font_size, part = 'all')",
   "  ft <- flextable::autofit(ft)",
   "  ft",
-  "}",
-  "add_metric_footnotes <- function(ft, binary_threshold, class_breaks) {",
-  "  if (is.null(ft) || !inherits(ft, 'flextable')) {",
-  "    return(ft)",
-  "  }",
-  "  class_text <- sprintf(",
-  "    '<%s pg/mL, %s-<%s pg/mL, %s-<%s pg/mL, >=%s pg/mL',",
-  "    class_breaks[1], class_breaks[1], class_breaks[2],",
-  "    class_breaks[2], class_breaks[3], class_breaks[3]",
-  "  )",
-  "  kappa_text <- sprintf(",
-  "    'Weighted kappa is calculated across NT-proBNP categories: %s.',",
-  "    class_text",
-  "  )",
-  "  binary_text <- sprintf(",
-  "    'Binary metrics (sensitivity, specificity, PPV, NPV) use NT-proBNP >=%s pg/mL vs <%s pg/mL.',",
-  "    binary_threshold, binary_threshold",
-  "  )",
-  "  flextable::add_footer_lines(ft, values = c(kappa_text, binary_text))",
-  "}",
-  "format_modelsummary_estimates <- function(df, digits = 2) {",
-  "  if (!'statistic' %in% names(df)) {",
-  "    return(df)",
-  "  }",
-  "  model_cols <- setdiff(names(df), c('part', 'term', 'statistic'))",
-  "  if (length(model_cols) == 0) {",
-  "    return(df)",
-  "  }",
-  "  format_cell <- function(x) {",
-  "    if (is.na(x) || !nzchar(x)) {",
-  "      return(x)",
-  "    }",
-  "    pattern <- '[-+]?(?:\\\\d*\\\\.\\\\d+|\\\\d+)(?:[eE][-+]?\\\\d+)?'",
-  "    matches <- regmatches(x, gregexpr(pattern, x, perl = TRUE))[[1]]",
-  "    if (length(matches) == 0) {",
-  "      return(x)",
-  "    }",
-  "    formatted <- vapply(",
-  "      matches,",
-  "      function(val) formatC(as.numeric(val), format = 'f', digits = digits),",
-  "      character(1)",
-  "    )",
-  "    out <- x",
-  "    for (i in seq_along(matches)) {",
-  "      out <- sub(pattern, formatted[i], out, perl = TRUE)",
-  "    }",
-  "    out",
-  "  }",
-  "  estimate_rows <- df$statistic == 'estimate'",
-  "  if (!any(estimate_rows)) {",
-  "    return(df)",
-  "  }",
-  "  df[estimate_rows, model_cols] <- lapply(",
-  "    df[estimate_rows, model_cols, drop = FALSE],",
-  "    function(col) vapply(col, format_cell, character(1))",
-  "  )",
-  "  df",
   "}",
   "page_break <- function() knitr::asis_output('\\\\pagebreak')",
   "filter_protocol_metrics <- function(df) {",
@@ -2931,12 +2750,13 @@ report_lines <- c(
   "    'pearson_r', 'rsq', 'rmse',",
   "    'weighted_kappa_quadratic',",
   "    'sens', 'spec', 'ppv', 'npv',",
-  "    'paba_intercept', 'paba_slope'",
+  "    'paba_intercept', 'paba_intercept_lower', 'paba_intercept_upper',",
+  "    'paba_slope', 'paba_slope_lower', 'paba_slope_upper'",
   "  )",
   "  df <- dplyr::filter(df, .metric %in% allowed)",
   "  df <- dplyr::filter(df, !(.metric %in% c('sens','spec','ppv','npv') & .estimator != 'binary'))",
   "  df <- dplyr::filter(df, !(.metric %in% c('weighted_kappa_quadratic') & .estimator != 'weighted'))",
-  "  df <- dplyr::filter(df, !(.metric %in% c('paba_intercept','paba_slope') & .estimator != 'PaBa'))",
+  "  df <- dplyr::filter(df, !(.metric %in% c('paba_intercept','paba_intercept_lower','paba_intercept_upper','paba_slope','paba_slope_lower','paba_slope_upper') & .estimator != 'PaBa'))",
   "  df <- dplyr::filter(df, !(.metric %in% c('pearson_r') & .estimator != 'pearson'))",
   "  df <- df %>%",
   "    dplyr::mutate(.metric = factor(.metric, levels = allowed)) %>%",
@@ -2947,51 +2767,6 @@ report_lines <- c(
   "",
   "# Overview",
   "This report compiles the figures and tables produced by the analysis script and describes how each output corresponds to the published protocol.",
-  "",
-  "# Model Specifications and Regression Rationale",
-  "",
-  "## Original conversion model (Kasahara et al.)",
-  "Predictors: log10(BNP), age, BMI, hemoglobin (g/dL), creatinine clearance (CrCl) with spline terms (knots at 56.5, 72.4, 93.7 mL/min), sex (Sex_M = 1 male, 0 female), and atrial fibrillation (AF = 1 yes).",
-  "The exact model implemented is:",
-  "$$",
-  "\\\\log_{10}(\\\\widehat{\\\\text{NT-proBNP}}) = 2.05 + 0.907\\\\log_{10}(\\\\text{BNP}) - 0.00522\\\\,\\\\text{Age} + 0.00283\\\\,\\\\text{BMI} - 0.00866\\\\,\\\\text{Hb} + g(\\\\text{CrCl}) + 0.0164\\\\,(1-\\\\text{Sex}_M) + 0.194\\\\,\\\\text{AF}",
-  "$$",
-  "with",
-  "$$",
-  "g(\\\\text{CrCl}) = -0.0422\\\\,\\\\text{CrCl} + 0.000530\\\\,\\\\text{CrCl}^2 - 0.00000214\\\\,\\\\text{CrCl}^3 - 0.00000278\\\\,(\\\\text{CrCl}-k_1)_+^3 + 0.00000621\\\\,(\\\\text{CrCl}-k_2)_+^3 - 0.00000133\\\\,(\\\\text{CrCl}-k_3)_+^3,",
-  "$$",
-  "where $k_1=56.5$, $k_2=72.4$, and $k_3=93.7$. The predicted NT-proBNP is obtained by $10^{\\\\log_{10}(\\\\widehat{\\\\text{NT-proBNP}})}$.",
-  "",
-  "## Simple linear recalibration of the Kasahara model",
-  "Before moving to a new model, we fit a simple calibration regression on the original scale to correct any systematic offset or slope bias: $\\\\text{NT-proBNP} = a + b\\\\times\\\\widehat{\\\\text{NT-proBNP}}_{Kasahara}$. This does not change predictors; it only rescales predictions to the local cohort.",
-  "",
-  "```{r table-kasahara-simple-recal}",
-  "simple_recal_path <- file.path(params$output_dir, 'kasahara_simple_recalibration.csv')",
-  "if (file.exists(simple_recal_path)) {",
-  "  simple_recal <- readr::read_csv(simple_recal_path, show_col_types = FALSE)",
-  "  format_table(",
-  "    simple_recal,",
-  "    'Kasahara simple linear recalibration coefficients (original scale).',",
-  "    digits = 2,",
-  "    font_size = 8",
-  "  )",
-  "} else {",
-  "  cat('Kasahara simple recalibration coefficients not found.\\n')",
-  "}",
-  "```",
-  "",
-  "## New conversion model (OLS on log scale)",
-  "Predictors: age, CrCl, log(BNP), sex (Sex_M), BMI, AF, and hemoglobin (Hb_gdl). Age, CrCl, and log(BNP) are modeled with restricted cubic splines (3 knots) and their full three-way interaction; BMI and Hb_gdl are also modeled with restricted cubic splines (3 knots).",
-  "The model specification is:",
-  "$$",
-  "\\\\log(\\\\widehat{\\\\text{NT-proBNP}}) = \\\\beta_0 + f_1(\\\\text{Age}) + f_2(\\\\text{CrCl}) + f_3(\\\\log(\\\\text{BNP})) + f_{12}(\\\\text{Age},\\\\text{CrCl}) + f_{13}(\\\\text{Age},\\\\log(\\\\text{BNP})) + f_{23}(\\\\text{CrCl},\\\\log(\\\\text{BNP})) + f_{123}(\\\\text{Age},\\\\text{CrCl},\\\\log(\\\\text{BNP})) + \\\\beta_4\\\\,\\\\text{Sex}_M + f_4(\\\\text{BMI}) + \\\\beta_5\\\\,\\\\text{AF} + f_5(\\\\text{Hb}),",
-  "$$",
-  "where each $f(\\\\cdot)$ is a restricted cubic spline basis with 3 knots. The model is fit by OLS on the log scale; exponentiating $\\\\hat{\\\\mu}$ yields the median NT-proBNP on the original scale. The mean on the original scale is $\\\\exp(\\\\hat{\\\\mu} + \\\\hat{\\\\sigma}^2/2)$ under a log-normal error assumption.",
-  "",
-  "## Regression and calibration rationale",
-  "OLS on the log scale estimates the conditional mean of log(NT-proBNP). Because log-transformed residuals are approximately symmetric, back-transforming yields a median prediction on the original scale, which is often more stable for right-skewed biomarkers. If a mean prediction is desired, the log-scale residual variance is incorporated via $\\\\exp(\\\\hat{\\\\mu} + \\\\hat{\\\\sigma}^2/2)$.",
-  "Simple linear recalibration (intercept and slope) is a standard calibration step that corrects global bias without refitting predictors. This is useful to assess how much of the error is systematic and whether a new model is necessary.",
-  "Passing-Bablok (PB) regression is a robust, non-parametric method for method comparison that is less sensitive to outliers and distributional assumptions. We use PB primarily to assess and, if needed, recalibrate slope and intercept on the log scale. If PB yields a slope near 1 and intercept near 0, it indicates little systematic bias and PB-based recalibration may be unnecessary.",
   "",
   "# Baseline Characteristics",
   "Baseline characteristics are summarized for the initial cohort (Table 1).",
@@ -3019,14 +2794,12 @@ report_lines <- c(
   "if (file.exists(kasahara_metrics_path)) {",
   "  kasahara_metrics <- readr::read_csv(kasahara_metrics_path, show_col_types = FALSE)",
   "  kasahara_metrics <- filter_protocol_metrics(kasahara_metrics)",
-  "  ft <- format_table(",
+  "  format_table(",
   "    kasahara_metrics,",
   "    'Kasahara model performance metrics (includes RMSE and R-squared).',",
-  "    digits = 2,",
+  "    digits = 3,",
   "    font_size = 8",
   "  )",
-  "  ft <- add_metric_footnotes(ft, binary_threshold, class_breaks)",
-  "  ft",
   "} else {",
   "  cat('Kasahara metrics file not found.\\n')",
   "}",
@@ -3068,7 +2841,7 @@ report_lines <- c(
   "  format_table(",
   "    paba_boot,",
   "    'Bootstrapped Passing-Bablok calibration (log-log scale).',",
-  "    digits = 2,",
+  "    digits = 4,",
   "    font_size = 8",
   "  )",
   "} else {",
@@ -3082,14 +2855,12 @@ report_lines <- c(
   "if (file.exists(newmodel_metrics_path)) {",
   "  newmodel_metrics <- readr::read_csv(newmodel_metrics_path, show_col_types = FALSE)",
   "  newmodel_metrics <- filter_protocol_metrics(newmodel_metrics)",
-  "  ft <- format_table(",
+  "  format_table(",
   "    newmodel_metrics,",
   "    'Apparent performance metrics for the recalibrated model (median prediction, PaBa).',",
-  "    digits = 2,",
+  "    digits = 3,",
   "    font_size = 8",
   "  )",
-  "  ft <- add_metric_footnotes(ft, binary_threshold, class_breaks)",
-  "  ft",
   "} else {",
   "  cat('New model performance file not found.\\n')",
   "}",
@@ -3101,14 +2872,12 @@ report_lines <- c(
   "if (file.exists(optimism_path)) {",
   "  optimism_tbl <- readr::read_csv(optimism_path, show_col_types = FALSE)",
   "  optimism_tbl <- filter_protocol_metrics(optimism_tbl)",
-  "  ft <- format_table(",
+  "  format_table(",
   "    optimism_tbl,",
   "    'Optimism-corrected performance metrics (bootstrap).',",
-  "    digits = 2,",
+  "    digits = 3,",
   "    font_size = 8",
   "  )",
-  "  ft <- add_metric_footnotes(ft, binary_threshold, class_breaks)",
-  "  ft",
   "} else {",
   "  cat('Optimism-corrected metrics file not found.\\n')",
   "}",
@@ -3155,16 +2924,40 @@ report_lines <- c(
   "    gof_map = NA,",
   "    output = 'data.frame'",
   "  )",
-  "  tbl_a <- format_modelsummary_estimates(tbl_a, digits = 2)",
   "  format_table(",
   "    tbl_a,",
   "    'Association between measured NT-proBNP categories and the composite outcome (odds ratios).',",
-  "    digits = 2,",
+  "    digits = 3,",
   "    font_size = 8,",
   "    drop_model_type = FALSE",
   "  )",
   "} else {",
   "  cat('Outcome model A not available.\\n')",
+  "}",
+  "```",
+  "\\pagebreak",
+  "",
+  "```{r table-outcome-b}",
+  "model_b_glm <- get_obj('model_b_glm')",
+  "model_b_firth <- get_obj('model_b_firth')",
+  "if (!is.null(model_b_glm) && !is.null(model_b_firth)) {",
+  "  tbl_b <- modelsummary::modelsummary(",
+  "    list('GLM' = model_b_glm, 'Firth GLM' = model_b_firth),",
+  "    estimate = '{estimate} [{conf.low}, {conf.high}]',",
+  "    statistic = 'p.value',",
+  "    exponentiate = TRUE,",
+  "    gof_map = NA,",
+  "    output = 'data.frame'",
+  "  )",
+  "  format_table(",
+  "    tbl_b,",
+  "    'Association between derived BNP categories and the composite outcome (odds ratios).',",
+  "    digits = 3,",
+  "    font_size = 8,",
+  "    drop_model_type = FALSE",
+  "  )",
+  "} else {",
+  "  cat('Outcome model B not available.\\n')",
   "}",
   "```",
   "\\pagebreak",
@@ -3181,11 +2974,10 @@ report_lines <- c(
   "    gof_map = NA,",
   "    output = 'data.frame'",
   "  )",
-  "  tbl_c <- format_modelsummary_estimates(tbl_c, digits = 2)",
   "  format_table(",
   "    tbl_c,",
   "    'Association between predicted NT-proBNP categories (median PaBa) and the composite outcome (odds ratios).',",
-  "    digits = 2,",
+  "    digits = 3,",
   "    font_size = 8,",
   "    drop_model_type = FALSE",
   "  )",
