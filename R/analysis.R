@@ -115,13 +115,78 @@ class_metrics_set <- metric_set(accuracy, sens, spec, ppv, npv, kap) # Added kap
 continuous_metrics_set <- metric_set(rmse, rsq, mae)
 # Plotting Helpers
 lblr <- function(x) glue::glue('{scales::comma(x)} pg/mL')
-my_theme <- theme_classic(base_size = 12) %+replace%
+PLOT_STYLE <- list(
+  base_size = 12,
+  point = list(
+    alpha = 0.55,
+    size = 1.6,
+    shape = 21,
+    fill = "grey80",
+    color = "grey30",
+    stroke = 0.3
+  ),
+  colors = list(
+    identity = "#D55E00",
+    fit = "#0072B2",
+    mean = "#0072B2",
+    limits = "#D55E00",
+    ribbon = "#9ECAE1",
+    neutral = "grey50"
+  ),
+  fills = list(
+    relative = "#C6DBEF",
+    absolute = "#C7E9C0"
+  ),
+  text = list(
+    axis = "grey20",
+    title = "grey10",
+    subtitle = "grey30"
+  ),
+  grid = "grey92",
+  strip_bg = "grey90",
+  line_width = 0.9,
+  annotation_size = 3.4
+)
+
+scatter_geom <- function(fill = PLOT_STYLE$point$fill) {
+  geom_point(
+    alpha = PLOT_STYLE$point$alpha,
+    shape = PLOT_STYLE$point$shape,
+    fill = fill,
+    color = PLOT_STYLE$point$color,
+    size = PLOT_STYLE$point$size,
+    stroke = PLOT_STYLE$point$stroke
+  )
+}
+
+my_theme <- theme_classic(base_size = PLOT_STYLE$base_size) %+replace%
   theme(
     aspect.ratio = 1,
-    panel.grid.major = element_line(colour = "grey92"),
-    plot.margin = margin(10, 10, 10, 10),
-    strip.background = element_rect(fill = "grey90", colour = NA),
-    strip.text = element_text(face = "bold")
+    panel.grid.major = element_line(
+      colour = PLOT_STYLE$grid,
+      linewidth = 0.4
+    ),
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(face = "bold", color = PLOT_STYLE$text$axis),
+    axis.text = element_text(color = PLOT_STYLE$text$axis),
+    axis.line = element_line(color = PLOT_STYLE$text$axis, linewidth = 0.4),
+    plot.title = element_text(
+      face = "bold",
+      size = rel(1.1),
+      color = PLOT_STYLE$text$title
+    ),
+    plot.subtitle = element_text(
+      size = rel(0.9),
+      color = PLOT_STYLE$text$subtitle
+    ),
+    plot.margin = margin(10, 12, 10, 10),
+    strip.background = element_rect(
+      fill = PLOT_STYLE$strip_bg,
+      colour = NA
+    ),
+    strip.text = element_text(face = "bold", color = PLOT_STYLE$text$title),
+    legend.position = "bottom",
+    legend.title = element_blank()
   )
 # Mode Function
 Mode <- function(x, na.rm = TRUE) {
@@ -227,19 +292,13 @@ make_actual_vs_pred_plot <- function(
     )
   }
   p <- ggplot(plot_data, aes(x = predicted, y = actual)) +
-    geom_point(
-      alpha = 0.5,
-      shape = 21,
-      fill = 'grey70',
-      color = 'black',
-      size = 1.5
-    ) +
+    scatter_geom() +
     geom_abline(
       slope = 1,
       intercept = 0,
-      color = "red",
+      color = PLOT_STYLE$colors$identity,
       linetype = "dashed",
-      linewidth = 1
+      linewidth = PLOT_STYLE$line_width
     ) +
     labs(
       title = glue("Actual vs Predicted: {model_name}"),
@@ -462,23 +521,25 @@ make_bland_altman_plot <- function(
   } else {
     "Absolute Error (pg/mL)"
   }
-  fill_color <- if (type == "relative") "lightblue" else "lightgreen"
+  fill_color <- if (type == "relative") {
+    PLOT_STYLE$fills$relative
+  } else {
+    PLOT_STYLE$fills$absolute
+  }
   anno_suffix <- if (type == "relative") "%" else ""
   anno_multiplier <- if (type == "relative") 100 else 1
   p <- ggplot(plot_df, aes(x = av, y = plotted_err)) +
-    geom_point(
-      alpha = 0.5,
-      shape = 21,
-      fill = fill_color,
-      color = 'black',
-      size = 1.5
+    scatter_geom(fill = fill_color) +
+    geom_hline(
+      yintercept = mu_err,
+      color = PLOT_STYLE$colors$mean,
+      linewidth = PLOT_STYLE$line_width
     ) +
-    geom_hline(yintercept = mu_err, color = "blue", linewidth = 1) +
     geom_hline(
       yintercept = c(lower_limit, upper_limit),
       linetype = "dashed",
-      color = "red",
-      linewidth = 1
+      color = PLOT_STYLE$colors$limits,
+      linewidth = PLOT_STYLE$line_width
     ) +
     annotate(
       "text",
@@ -487,8 +548,8 @@ make_bland_altman_plot <- function(
       label = sprintf("Mean = %.2f%s", mu_err * anno_multiplier, anno_suffix),
       hjust = 1.05,
       vjust = -0.5,
-      color = "blue",
-      size = 3.5
+      color = PLOT_STYLE$colors$mean,
+      size = PLOT_STYLE$annotation_size
     ) +
     annotate(
       "text",
@@ -501,8 +562,8 @@ make_bland_altman_plot <- function(
       ),
       hjust = 1.05,
       vjust = -0.5,
-      color = "red",
-      size = 3.5
+      color = PLOT_STYLE$colors$limits,
+      size = PLOT_STYLE$annotation_size
     ) +
     annotate(
       "text",
@@ -515,12 +576,12 @@ make_bland_altman_plot <- function(
       ),
       hjust = 1.05,
       vjust = 1.5,
-      color = "red",
-      size = 3.5
+      color = PLOT_STYLE$colors$limits,
+      size = PLOT_STYLE$annotation_size
     ) +
     scale_x_continuous(labels = lblr) +
     (if (type == "relative") {
-      scale_y_continuous(labels = scales::percent)
+      scale_y_continuous(labels = scales::label_percent(accuracy = 1))
     } else {
       scale_y_continuous(labels = lblr)
     }) +
@@ -759,27 +820,21 @@ make_calibration_plot <- function(
     "OLS Fit: Actual = {sprintf('%.2f', cal_intercept)} + {sprintf('%.2f', cal_slope)} * Predicted"
   )
   p <- ggplot(plot_data, aes(x = predicted, y = actual)) + # Swapped axes for typical calibration plot
-    geom_point(
-      alpha = 0.5,
-      shape = 21,
-      fill = 'grey70',
-      color = 'black',
-      size = 1.5
-    ) +
+    scatter_geom() +
     geom_abline(
       slope = 1,
       intercept = 0,
-      color = "red",
+      color = PLOT_STYLE$colors$identity,
       linetype = "dashed",
-      linewidth = 1
+      linewidth = PLOT_STYLE$line_width
     ) + # Line of identity
     geom_smooth(
       method = "lm",
       se = TRUE,
-      color = "blue",
-      fill = "lightblue",
+      color = PLOT_STYLE$colors$fit,
+      fill = PLOT_STYLE$colors$ribbon,
       formula = y ~ x,
-      linewidth = 0.8
+      linewidth = PLOT_STYLE$line_width
     ) + # Calibration line
     labs(
       title = glue("Calibration Plot: {model_name}"),
@@ -837,21 +892,19 @@ make_loglog_calibration_plot <- function(
     "Log10 Fit: log10(Actual) = {sprintf('%.2f', log_intercept)} + {sprintf('%.2f', log_slope)} * log10(Predicted)"
   )
   p <- ggplot(plot_data, aes(x = predicted, y = actual)) +
-    geom_point(
-      alpha = 0.5,
-      shape = 21,
-      fill = 'grey70',
-      color = 'black',
-      size = 1.5
-    ) +
+    scatter_geom() +
     geom_abline(
       slope = 1,
       intercept = 0,
-      color = "red",
+      color = PLOT_STYLE$colors$identity,
       linetype = "dashed",
-      linewidth = 1
+      linewidth = PLOT_STYLE$line_width
     ) +
-    geom_line(aes(y = fit), color = "blue", linewidth = 0.9) +
+    geom_line(
+      aes(y = fit),
+      color = PLOT_STYLE$colors$fit,
+      linewidth = PLOT_STYLE$line_width
+    ) +
     scale_x_log10(labels = lblr) +
     scale_y_log10(labels = lblr) +
     labs(
@@ -943,9 +996,12 @@ plot_mcreg <- function(mcreg_obj, filename, title) {
           plot.type = "regression",
           ci.area = TRUE,
           main = title,
-          points.col = alpha("black", 0.5),
+          points.col = alpha(
+            PLOT_STYLE$point$color,
+            PLOT_STYLE$point$alpha
+          ),
           points.pch = 16,
-          points.cex = 0.8
+          points.cex = 0.9
         )
       },
       error = function(e) {
@@ -2578,9 +2634,13 @@ if (nrow(logit_md) < 30) {
       plot_df,
       aes(x = x, y = exp(Contrast), ymin = exp(Lower), ymax = exp(Upper))
     ) +
-      geom_ribbon(alpha = 0.2, fill = '#1E8977') +
-      geom_line(color = '#1E8977', linewidth = 1) +
-      geom_hline(yintercept = 1, linetype = 'dashed', color = 'gray50') +
+      geom_ribbon(alpha = 0.2, fill = PLOT_STYLE$colors$ribbon) +
+      geom_line(color = PLOT_STYLE$colors$fit, linewidth = PLOT_STYLE$line_width) +
+      geom_hline(
+        yintercept = 1,
+        linetype = 'dashed',
+        color = PLOT_STYLE$colors$neutral
+      ) +
       scale_y_log10(
         n.breaks = 8,
         labels = scales::label_number(accuracy = 0.1)

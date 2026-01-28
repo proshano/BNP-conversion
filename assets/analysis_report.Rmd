@@ -159,16 +159,16 @@ This report compiles the figures and tables produced by the analysis script and 
 Predictors: log10(BNP), age, BMI, hemoglobin (g/dL), creatinine clearance (CrCl) with spline terms (knots at 56.5, 72.4, 93.7 mL/min), sex (Sex_M = 1 male, 0 female), and atrial fibrillation (AF = 1 yes).
 The exact model implemented is:
 $$
-\\log_{10}(\\widehat{\\text{NT-proBNP}}) = 2.05 + 0.907\\log_{10}(\\text{BNP}) - 0.00522\\,\\text{Age} + 0.00283\\,\\text{BMI} - 0.00866\\,\\text{Hb} + g(\\text{CrCl}) + 0.0164\\,(1-\\text{Sex}_M) + 0.194\\,\\text{AF}
+\log_{10}(\widehat{\text{NT-proBNP}}) = 2.05 + 0.907\log_{10}(\text{BNP}) - 0.00522\,\text{Age} + 0.00283\,\text{BMI} - 0.00866\,\text{Hb} + g(\text{CrCl}) + 0.0164\,(1-\text{Sex}_M) + 0.194\,\text{AF}
 $$
 with
 $$
-g(\\text{CrCl}) = -0.0422\\,\\text{CrCl} + 0.000530\\,\\text{CrCl}^2 - 0.00000214\\,\\text{CrCl}^3 - 0.00000278\\,(\\text{CrCl}-k_1)_+^3 + 0.00000621\\,(\\text{CrCl}-k_2)_+^3 - 0.00000133\\,(\\text{CrCl}-k_3)_+^3,
+g(\text{CrCl}) = -0.0422\,\text{CrCl} + 0.000530\,\text{CrCl}^2 - 0.00000214\,\text{CrCl}^3 - 0.00000278\,(\text{CrCl}-k_1)_+^3 + 0.00000621\,(\text{CrCl}-k_2)_+^3 - 0.00000133\,(\text{CrCl}-k_3)_+^3,
 $$
-where $k_1=56.5$, $k_2=72.4$, and $k_3=93.7$. The predicted NT-proBNP is obtained by $10^{\\log_{10}(\\widehat{\\text{NT-proBNP}})}$.
+where $k_1=56.5$, $k_2=72.4$, and $k_3=93.7$. The predicted NT-proBNP is obtained by $10^{\log_{10}(\widehat{\text{NT-proBNP}})}$.
 
 ## Simple linear recalibration of the Kasahara model
-Before moving to a new model, we fit a simple calibration regression on the original scale to correct any systematic offset or slope bias: $\\text{NT-proBNP} = a + b\\times\\widehat{\\text{NT-proBNP}}_{Kasahara}$. This does not change predictors; it only rescales predictions to the local cohort.
+Before moving to a new model, we fit a simple calibration regression on the original scale to correct any systematic offset or slope bias: $\text{NT-proBNP} = a + b\times\widehat{\text{NT-proBNP}}_{Kasahara}$. This does not change predictors; it only rescales predictions to the local cohort.
 
 ```{r table-kasahara-simple-recal}
 simple_recal_path <- file.path(params$output_dir, 'kasahara_simple_recalibration.csv')
@@ -189,12 +189,12 @@ if (file.exists(simple_recal_path)) {
 Predictors: age, CrCl, log(BNP), sex (Sex_M), BMI, AF, and hemoglobin (Hb_gdl). Age, CrCl, and log(BNP) are modeled with restricted cubic splines (3 knots) and their full three-way interaction; BMI and Hb_gdl are also modeled with restricted cubic splines (3 knots).
 The model specification is:
 $$
-\\log(\\widehat{\\text{NT-proBNP}}) = \\beta_0 + f_1(\\text{Age}) + f_2(\\text{CrCl}) + f_3(\\log(\\text{BNP})) + f_{12}(\\text{Age},\\text{CrCl}) + f_{13}(\\text{Age},\\log(\\text{BNP})) + f_{23}(\\text{CrCl},\\log(\\text{BNP})) + f_{123}(\\text{Age},\\text{CrCl},\\log(\\text{BNP})) + \\beta_4\\,\\text{Sex}_M + f_4(\\text{BMI}) + \\beta_5\\,\\text{AF} + f_5(\\text{Hb}),
+\log(\widehat{\text{NT-proBNP}}) = \beta_0 + f_1(\text{Age}) + f_2(\text{CrCl}) + f_3(\log(\text{BNP})) + f_{12}(\text{Age},\text{CrCl}) + f_{13}(\text{Age},\log(\text{BNP})) + f_{23}(\text{CrCl},\log(\text{BNP})) + f_{123}(\text{Age},\text{CrCl},\log(\text{BNP})) + \beta_4\,\text{Sex}_M + f_4(\text{BMI}) + \beta_5\,\text{AF} + f_5(\text{Hb}),
 $$
-where each $f(\\cdot)$ is a restricted cubic spline basis with 3 knots. The model is fit by OLS on the log scale; exponentiating $\\hat{\\mu}$ yields the median NT-proBNP on the original scale. The mean on the original scale is $\\exp(\\hat{\\mu} + \\hat{\\sigma}^2/2)$ under a log-normal error assumption.
+where each $f(\cdot)$ is a restricted cubic spline basis with 3 knots. The model is fit by OLS on the log scale; exponentiating $\hat{\mu}$ yields the median NT-proBNP on the original scale. The mean on the original scale is $\exp(\hat{\mu} + \hat{\sigma}^2/2)$ under a log-normal error assumption.
 
 ## Regression and calibration rationale
-OLS on the log scale estimates the conditional mean of log(NT-proBNP). Because log-transformed residuals are approximately symmetric, back-transforming yields a median prediction on the original scale, which is often more stable for right-skewed biomarkers. If a mean prediction is desired, the log-scale residual variance is incorporated via $\\exp(\\hat{\\mu} + \\hat{\\sigma}^2/2)$.
+OLS on the log scale estimates the conditional mean of log(NT-proBNP). Because log-transformed residuals are approximately symmetric, back-transforming yields a median prediction on the original scale, which is often more stable for right-skewed biomarkers. If a mean prediction is desired, the log-scale residual variance is incorporated via $\exp(\hat{\mu} + \hat{\sigma}^2/2)$.
 Simple linear recalibration (intercept and slope) is a standard calibration step that corrects global bias without refitting predictors. This is useful to assess how much of the error is systematic and whether a new model is necessary.
 Passing-Bablok (PB) regression is a robust, non-parametric method for method comparison that is less sensitive to outliers and distributional assumptions. We use PB primarily to assess and, if needed, recalibrate slope and intercept on the log scale. If PB yields a slope near 1 and intercept near 0, it indicates little systematic bias and PB-based recalibration may be unnecessary.
 
