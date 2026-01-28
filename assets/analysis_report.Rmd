@@ -1,0 +1,456 @@
+---
+title: "BNP to NT-proBNP Substudy Report"
+output:
+  word_document:
+    toc: true
+    number_sections: true
+params:
+  output_dir: "/Users/pavelroshanov/Documents/Projects/POISE 3/POISE-3 BNP substudy/BNP conversion/assets"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.align = 'center', fig.width = 6.5, fig.height = 6.5, out.width = '100%')
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(ggplot2)
+  library(gtsummary)
+  library(modelsummary)
+  library(knitr)
+  library(flextable)
+})
+dir.create(params$output_dir, showWarnings = FALSE, recursive = TRUE)
+binary_threshold <- 300
+class_breaks <- c(100, 200, 1500)
+get_obj <- function(name) {
+  if (exists(name, envir = knitr::knit_global())) {
+    get(name, envir = knitr::knit_global())
+  } else {
+    NULL
+  }
+}
+format_table <- function(df, caption, digits = 2, p_digits = 3, font_size = 9, drop_model_type = TRUE) {
+  if (drop_model_type && 'model_type' %in% names(df)) {
+    df <- dplyr::select(df, -model_type)
+  }
+  if (all(c('.estimate', 'ci_lower', 'ci_upper') %in% names(df))) {
+    df <- df %>%
+      dplyr::mutate(
+        estimate_ci = ifelse(
+          is.finite(ci_lower) & is.finite(ci_upper),
+          sprintf(paste0('%.', digits, 'f [%.', digits, 'f, %.', digits, 'f]'), .estimate, ci_lower, ci_upper),
+          sprintf(paste0('%.', digits, 'f'), .estimate)
+        )
+      ) %>%
+      dplyr::select(-.estimate, -ci_lower, -ci_upper) %>%
+      dplyr::rename(.estimate = estimate_ci)
+  }
+  df <- df %>%
+    dplyr::rename_with(~ gsub('^\\.', '', .x)) %>%
+    dplyr::rename_with(~ gsub('_', ' ', .x))
+  num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+  name_lower <- tolower(names(df))
+  p_cols <- names(df)[grepl('p\\.value|p value|p-value|pvalue', name_lower)]
+  count_cols <- names(df)[grepl('(^n\\b)|\\bnobs\\b|\\bn obs\\b|\\bcount\\b|\\bnumber\\b|\\bsubjects\\b|\\bpatients\\b|\\bsample size\\b', name_lower)]
+  p_cols <- intersect(p_cols, num_cols)
+  count_cols <- intersect(count_cols, num_cols)
+  num_cols_main <- setdiff(num_cols, union(p_cols, count_cols))
+  ft <- flextable::flextable(df)
+  if (length(num_cols_main) > 0) {
+    ft <- flextable::colformat_double(ft, j = num_cols_main, digits = digits)
+  }
+  if (length(p_cols) > 0) {
+    ft <- flextable::colformat_double(ft, j = p_cols, digits = p_digits)
+  }
+  if (length(count_cols) > 0) {
+    ft <- flextable::colformat_int(ft, j = count_cols)
+  }
+  ft <- flextable::set_caption(ft, caption = caption)
+  ft <- flextable::fontsize(ft, size = font_size, part = 'all')
+  ft <- flextable::autofit(ft)
+  ft
+}
+add_metric_footnotes <- function(ft, binary_threshold, class_breaks) {
+  if (is.null(ft) || !inherits(ft, 'flextable')) {
+    return(ft)
+  }
+  class_text <- sprintf(
+    '<%s pg/mL, %s-<%s pg/mL, %s-<%s pg/mL, >=%s pg/mL',
+    class_breaks[1], class_breaks[1], class_breaks[2],
+    class_breaks[2], class_breaks[3], class_breaks[3]
+  )
+  kappa_text <- sprintf(
+    'Weighted kappa is calculated across NT-proBNP categories: %s.',
+    class_text
+  )
+  binary_text <- sprintf(
+    'Binary metrics (sensitivity, specificity, PPV, NPV) use NT-proBNP >=%s pg/mL vs <%s pg/mL.',
+    binary_threshold, binary_threshold
+  )
+  flextable::add_footer_lines(ft, values = c(kappa_text, binary_text))
+}
+format_modelsummary_estimates <- function(df, digits = 2) {
+  if (!'statistic' %in% names(df)) {
+    return(df)
+  }
+  model_cols <- setdiff(names(df), c('part', 'term', 'statistic'))
+  if (length(model_cols) == 0) {
+    return(df)
+  }
+  format_cell <- function(x) {
+    if (is.na(x) || !nzchar(x)) {
+      return(x)
+    }
+    pattern <- '[-+]?(?:\\d*\\.\\d+|\\d+)(?:[eE][-+]?\\d+)?'
+    matches <- regmatches(x, gregexpr(pattern, x, perl = TRUE))[[1]]
+    if (length(matches) == 0) {
+      return(x)
+    }
+    formatted <- vapply(
+      matches,
+      function(val) formatC(as.numeric(val), format = 'f', digits = digits),
+      character(1)
+    )
+    out <- x
+    for (i in seq_along(matches)) {
+      out <- sub(pattern, formatted[i], out, perl = TRUE)
+    }
+    out
+  }
+  estimate_rows <- df$statistic == 'estimate'
+  if (!any(estimate_rows)) {
+    return(df)
+  }
+  df[estimate_rows, model_cols] <- lapply(
+    df[estimate_rows, model_cols, drop = FALSE],
+    function(col) vapply(col, format_cell, character(1))
+  )
+  df
+}
+page_break <- function() knitr::asis_output('\\pagebreak')
+filter_protocol_metrics <- function(df) {
+  if (!all(c('.metric', '.estimator') %in% names(df))) {
+    return(df)
+  }
+  allowed <- c(
+    'pearson_r', 'rsq', 'rmse',
+    'weighted_kappa_quadratic',
+    'sens', 'spec', 'ppv', 'npv',
+    'paba_intercept', 'paba_slope'
+  )
+  df <- dplyr::filter(df, .metric %in% allowed)
+  df <- dplyr::filter(df, !(.metric %in% c('sens','spec','ppv','npv') & .estimator != 'binary'))
+  df <- dplyr::filter(df, !(.metric %in% c('weighted_kappa_quadratic') & .estimator != 'weighted'))
+  df <- dplyr::filter(df, !(.metric %in% c('paba_intercept','paba_slope') & .estimator != 'PaBa'))
+  df <- dplyr::filter(df, !(.metric %in% c('pearson_r') & .estimator != 'pearson'))
+  df <- df %>%
+    dplyr::mutate(.metric = factor(.metric, levels = allowed)) %>%
+    dplyr::arrange(.metric, .estimator)
+  df
+}
+```
+
+# Overview
+This report compiles the figures and tables produced by the analysis script and describes how each output corresponds to the published protocol.
+
+# Model Specifications and Regression Rationale
+
+## Original conversion model (Kasahara et al.)
+Predictors: log10(BNP), age, BMI, hemoglobin (g/dL), creatinine clearance (CrCl) with spline terms (knots at 56.5, 72.4, 93.7 mL/min), sex (Sex_M = 1 male, 0 female), and atrial fibrillation (AF = 1 yes).
+The exact model implemented is:
+$$
+\\log_{10}(\\widehat{\\text{NT-proBNP}}) = 2.05 + 0.907\\log_{10}(\\text{BNP}) - 0.00522\\,\\text{Age} + 0.00283\\,\\text{BMI} - 0.00866\\,\\text{Hb} + g(\\text{CrCl}) + 0.0164\\,(1-\\text{Sex}_M) + 0.194\\,\\text{AF}
+$$
+with
+$$
+g(\\text{CrCl}) = -0.0422\\,\\text{CrCl} + 0.000530\\,\\text{CrCl}^2 - 0.00000214\\,\\text{CrCl}^3 - 0.00000278\\,(\\text{CrCl}-k_1)_+^3 + 0.00000621\\,(\\text{CrCl}-k_2)_+^3 - 0.00000133\\,(\\text{CrCl}-k_3)_+^3,
+$$
+where $k_1=56.5$, $k_2=72.4$, and $k_3=93.7$. The predicted NT-proBNP is obtained by $10^{\\log_{10}(\\widehat{\\text{NT-proBNP}})}$.
+
+## Simple linear recalibration of the Kasahara model
+Before moving to a new model, we fit a simple calibration regression on the original scale to correct any systematic offset or slope bias: $\\text{NT-proBNP} = a + b\\times\\widehat{\\text{NT-proBNP}}_{Kasahara}$. This does not change predictors; it only rescales predictions to the local cohort.
+
+```{r table-kasahara-simple-recal}
+simple_recal_path <- file.path(params$output_dir, 'kasahara_simple_recalibration.csv')
+if (file.exists(simple_recal_path)) {
+  simple_recal <- readr::read_csv(simple_recal_path, show_col_types = FALSE)
+  format_table(
+    simple_recal,
+    'Kasahara simple linear recalibration coefficients (original scale).',
+    digits = 2,
+    font_size = 8
+  )
+} else {
+  cat('Kasahara simple recalibration coefficients not found.\n')
+}
+```
+
+## New conversion model (OLS on log scale)
+Predictors: age, CrCl, log(BNP), sex (Sex_M), BMI, AF, and hemoglobin (Hb_gdl). Age, CrCl, and log(BNP) are modeled with restricted cubic splines (3 knots) and their full three-way interaction; BMI and Hb_gdl are also modeled with restricted cubic splines (3 knots).
+The model specification is:
+$$
+\\log(\\widehat{\\text{NT-proBNP}}) = \\beta_0 + f_1(\\text{Age}) + f_2(\\text{CrCl}) + f_3(\\log(\\text{BNP})) + f_{12}(\\text{Age},\\text{CrCl}) + f_{13}(\\text{Age},\\log(\\text{BNP})) + f_{23}(\\text{CrCl},\\log(\\text{BNP})) + f_{123}(\\text{Age},\\text{CrCl},\\log(\\text{BNP})) + \\beta_4\\,\\text{Sex}_M + f_4(\\text{BMI}) + \\beta_5\\,\\text{AF} + f_5(\\text{Hb}),
+$$
+where each $f(\\cdot)$ is a restricted cubic spline basis with 3 knots. The model is fit by OLS on the log scale; exponentiating $\\hat{\\mu}$ yields the median NT-proBNP on the original scale. The mean on the original scale is $\\exp(\\hat{\\mu} + \\hat{\\sigma}^2/2)$ under a log-normal error assumption.
+
+## Regression and calibration rationale
+OLS on the log scale estimates the conditional mean of log(NT-proBNP). Because log-transformed residuals are approximately symmetric, back-transforming yields a median prediction on the original scale, which is often more stable for right-skewed biomarkers. If a mean prediction is desired, the log-scale residual variance is incorporated via $\\exp(\\hat{\\mu} + \\hat{\\sigma}^2/2)$.
+Simple linear recalibration (intercept and slope) is a standard calibration step that corrects global bias without refitting predictors. This is useful to assess how much of the error is systematic and whether a new model is necessary.
+Passing-Bablok (PB) regression is a robust, non-parametric method for method comparison that is less sensitive to outliers and distributional assumptions. We use PB primarily to assess and, if needed, recalibrate slope and intercept on the log scale. If PB yields a slope near 1 and intercept near 0, it indicates little systematic bias and PB-based recalibration may be unnecessary.
+
+# Baseline Characteristics
+Baseline characteristics are summarized for the initial cohort (Table 1).
+
+```{r table-baseline}
+baseline_table_final <- get_obj('baseline_table_final')
+if (!is.null(baseline_table_final)) {
+  baseline_table_final <- baseline_table_final %>%
+    gtsummary::modify_caption('Baseline characteristics of the initial cohort.')
+  ft <- gtsummary::as_flex_table(baseline_table_final)
+  ft <- flextable::fontsize(ft, size = 8, part = 'all')
+  ft <- flextable::autofit(ft)
+  ft
+} else {
+  cat('Baseline table not available in memory.\n')
+}
+```
+```{r, results='asis'}
+page_break()
+```
+
+# Primary Analysis: Kasahara Conversion Formula
+The Kasahara formula was applied to BNP values to predict NT-proBNP. Agreement between measured and predicted values is summarized below.
+
+```{r table-kasahara-metrics}
+kasahara_metrics_path <- file.path(params$output_dir, 'kasahara_model_prediction_errors.csv')
+if (file.exists(kasahara_metrics_path)) {
+  kasahara_metrics <- readr::read_csv(kasahara_metrics_path, show_col_types = FALSE)
+  kasahara_metrics <- filter_protocol_metrics(kasahara_metrics)
+  ft <- format_table(
+    kasahara_metrics,
+    'Kasahara model performance metrics (includes RMSE and R-squared).',
+    digits = 2,
+    font_size = 8
+  )
+  ft <- add_metric_footnotes(ft, binary_threshold, class_breaks)
+  ft
+} else {
+  cat('Kasahara metrics file not found.\n')
+}
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-kasahara-cal-log, fig.cap='Kasahara model calibration plot (log scale).'}
+knitr::include_graphics(file.path(params$output_dir, 'calibration_plot_kasahara_log.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-kasahara-cal-lin, fig.cap='Kasahara model calibration plot (linear scale).'}
+knitr::include_graphics(file.path(params$output_dir, 'calibration_plot_kasahara_lin.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-kasahara-ba-rel, fig.cap='Kasahara model Bland-Altman plot (relative error).'}
+knitr::include_graphics(file.path(params$output_dir, 'BA_kasahara_relative.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-kasahara-ba-abs, fig.cap='Kasahara model Bland-Altman plot (absolute error).'}
+knitr::include_graphics(file.path(params$output_dir, 'BA_kasahara_absolute.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-kasahara-paba, fig.cap='Passing-Bablok regression for Kasahara model (measured vs predicted).'}
+knitr::include_graphics(file.path(params$output_dir, 'paba_plot_kasahara.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+# Updated Conversion Formula (Recalibrated Model)
+A new model was fit on log-transformed NT-proBNP with the specified predictors and interactions. Passing-Bablok regression (bootstrap) was used for recalibration.
+
+```{r table-paba-boot}
+paba_boot_path <- file.path(params$output_dir, 'paba_loglog_bootstrap_summary.csv')
+if (file.exists(paba_boot_path)) {
+  paba_boot <- readr::read_csv(paba_boot_path, show_col_types = FALSE)
+  format_table(
+    paba_boot,
+    'Bootstrapped Passing-Bablok calibration (log-log scale).',
+    digits = 2,
+    font_size = 8
+  )
+} else {
+  cat('Bootstrapped Passing-Bablok summary not found.\n')
+}
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r table-newmodel-metrics}
+newmodel_metrics_path <- file.path(params$output_dir, 'apparent_performance_new_model_median_paba.csv')
+if (file.exists(newmodel_metrics_path)) {
+  newmodel_metrics <- readr::read_csv(newmodel_metrics_path, show_col_types = FALSE)
+  newmodel_metrics <- filter_protocol_metrics(newmodel_metrics)
+  ft <- format_table(
+    newmodel_metrics,
+    'Apparent performance metrics for the recalibrated model (median prediction, PaBa).',
+    digits = 2,
+    font_size = 8
+  )
+  ft <- add_metric_footnotes(ft, binary_threshold, class_breaks)
+  ft
+} else {
+  cat('New model performance file not found.\n')
+}
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r table-newmodel-optimism}
+optimism_path <- file.path(params$output_dir, 'optimism_corrected_estimates_new_model_median_paba.csv')
+if (file.exists(optimism_path)) {
+  optimism_tbl <- readr::read_csv(optimism_path, show_col_types = FALSE)
+  optimism_tbl <- filter_protocol_metrics(optimism_tbl)
+  ft <- format_table(
+    optimism_tbl,
+    'Optimism-corrected performance metrics (bootstrap).',
+    digits = 2,
+    font_size = 8
+  )
+  ft <- add_metric_footnotes(ft, binary_threshold, class_breaks)
+  ft
+} else {
+  cat('Optimism-corrected metrics file not found.\n')
+}
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-new-cal-log, fig.cap='Recalibrated model calibration plot (log scale, median PaBa).'}
+knitr::include_graphics(file.path(params$output_dir, 'calibration_plot_new_median_paba_log.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-new-cal-lin, fig.cap='Recalibrated model calibration plot (linear scale, median PaBa).'}
+knitr::include_graphics(file.path(params$output_dir, 'calibration_plot_new_median_paba_lin.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-new-ba-rel, fig.cap='Recalibrated model Bland-Altman plot (relative error, median PaBa).'}
+knitr::include_graphics(file.path(params$output_dir, 'BA_new_median_paba_relative.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-new-ba-abs, fig.cap='Recalibrated model Bland-Altman plot (absolute error, median PaBa).'}
+knitr::include_graphics(file.path(params$output_dir, 'BA_new_median_paba_absolute.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-new-paba, fig.cap='Passing-Bablok regression for recalibrated model (median PaBa, measured vs predicted).'}
+knitr::include_graphics(file.path(params$output_dir, 'paba_plot_new_median_paba.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+# Secondary Analysis: Outcome Associations
+Logistic regression models evaluate associations between biomarker categories and the 30-day composite outcome.
+
+```{r table-outcome-a}
+model_a_glm <- get_obj('model_a_glm')
+model_a_firth <- get_obj('model_a_firth')
+if (!is.null(model_a_glm) && !is.null(model_a_firth)) {
+  tbl_a <- modelsummary::modelsummary(
+    list('GLM' = model_a_glm, 'Firth GLM' = model_a_firth),
+    estimate = '{estimate} [{conf.low}, {conf.high}]',
+    statistic = 'p.value',
+    exponentiate = TRUE,
+    gof_map = NA,
+    output = 'data.frame'
+  )
+  tbl_a <- format_modelsummary_estimates(tbl_a, digits = 2)
+  format_table(
+    tbl_a,
+    'Association between measured NT-proBNP categories and the composite outcome (odds ratios).',
+    digits = 2,
+    font_size = 8,
+    drop_model_type = FALSE
+  )
+} else {
+  cat('Outcome model A not available.\n')
+}
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r table-outcome-c}
+model_c_glm <- get_obj('model_c_glm')
+model_c_firth <- get_obj('model_c_firth')
+if (!is.null(model_c_glm) && !is.null(model_c_firth)) {
+  tbl_c <- modelsummary::modelsummary(
+    list('GLM' = model_c_glm, 'Firth GLM' = model_c_firth),
+    estimate = '{estimate} [{conf.low}, {conf.high}]',
+    statistic = 'p.value',
+    exponentiate = TRUE,
+    gof_map = NA,
+    output = 'data.frame'
+  )
+  tbl_c <- format_modelsummary_estimates(tbl_c, digits = 2)
+  format_table(
+    tbl_c,
+    'Association between predicted NT-proBNP categories (median PaBa) and the composite outcome (odds ratios).',
+    digits = 2,
+    font_size = 8,
+    drop_model_type = FALSE
+  )
+} else {
+  cat('Outcome model C not available.\n')
+}
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-outcome-ntprobnp, fig.cap='Association of measured NT-proBNP with outcome (spline model).'}
+knitr::include_graphics(file.path(params$output_dir, 'outcome_assoc_ntprobnp.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-outcome-bnp, fig.cap='Association of measured BNP with outcome (spline model).'}
+knitr::include_graphics(file.path(params$output_dir, 'outcome_assoc_bnp.png'))
+```
+```{r, results='asis'}
+page_break()
+```
+
+```{r fig-outcome-pred, fig.cap='Association of predicted NT-proBNP (new model, median PaBa) with outcome (spline model).'}
+knitr::include_graphics(file.path(params$output_dir, 'outcome_assoc_pred_new_median_paba.png'))
+```
+```{r, results='asis'}
+page_break()
+```
