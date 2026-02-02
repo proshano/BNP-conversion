@@ -9,8 +9,9 @@ print("Deriving biomarker categories...")
 # Define target NT-proBNP thresholds
 target_NTs <- CONFIG$target_ntprobnp_thresholds
 cut_points_ntprobnp <- c(-Inf, target_NTs, Inf)
-# Calculate corresponding BNP thresholds using the RECALIBRATED MEDIAN (PaBa) model
-print("Calculating corresponding BNP thresholds using median covariates...")
+# Calculate corresponding BNP thresholds using the RECALIBRATED KASAHARA model
+# (simpler 2-parameter recalibration as recommended)
+print("Calculating corresponding BNP thresholds using recalibrated Kasahara model...")
 median_covars_for_thresholds <- md %>%
   summarise(
     across(c(Age, BMI, CrCl, Hb_gdl), \(x) median(x, na.rm = TRUE)),
@@ -20,15 +21,29 @@ median_covars_for_thresholds <- md %>%
   )
 print("Median covariate grid for threshold calculation:")
 print(median_covars_for_thresholds)
-corresponding_BNPs_new <- sapply(target_NTs, function(nt) {
-  get_BNP_for_NT_new_model(
-    nt,
-    median_covars_for_thresholds,
-    fit_ols,
-    log10_recal_params,
-    use_mean = FALSE
-  )
-})
+
+# Use recalibrated Kasahara model (requires kasahara_recal_params from 05_kasahara_eval.R)
+if (!exists("kasahara_recal_params") || length(kasahara_recal_params) != 2) {
+  warning("Kasahara recalibration parameters not found. Using fit_ols as fallback.")
+  corresponding_BNPs_new <- sapply(target_NTs, function(nt) {
+    get_BNP_for_NT_new_model(
+      nt,
+      median_covars_for_thresholds,
+      fit_ols,
+      log10_recal_params,
+      use_mean = FALSE
+    )
+  })
+} else {
+  corresponding_BNPs_new <- sapply(target_NTs, function(nt) {
+    get_BNP_for_NT_kasahara_recal(
+      nt,
+      median_covars_for_thresholds,
+      kasahara_recal_params[1],  # intercept
+      kasahara_recal_params[2]   # slope
+    )
+  })
+}
 print("Calculated corresponding BNP thresholds (rounded to nearest integer):")
 bnp_threshold_summary <- tibble(
   NTproBNP_threshold = target_NTs,
@@ -51,64 +66,83 @@ print(cut_points_bnp_derived_new)
 print("Computing sensitivity of BNP thresholds to individual covariates...")
 # Base case: medians/mode as already computed
 base_case <- median_covars_for_thresholds
+
 # Define variations: one parameter at a time
+# Table will show each covariate value as a column
 sensitivity_profiles <- bind_rows(
-  base_case %>%
-    mutate(Profile = "Base case (medians)", Varied = "None", Value = "NA"),
-  base_case %>%
-    mutate(Sex_M = 0, Profile = "Female", Varied = "Sex_M", Value = "0"),
-  base_case %>%
-    mutate(Sex_M = 1, Profile = "Male", Varied = "Sex_M", Value = "1"),
-  base_case %>%
-    mutate(AF = 0, Profile = "No AF", Varied = "AF", Value = "0"),
-  base_case %>%
-    mutate(AF = 1, Profile = "With AF", Varied = "AF", Value = "1"),
-  base_case %>%
-    mutate(Age = 50, Profile = "Age 50", Varied = "Age", Value = "50"),
-  base_case %>%
-    mutate(Age = 75, Profile = "Age 75", Varied = "Age", Value = "75"),
-  base_case %>%
-    mutate(CrCl = 30, Profile = "CrCl 30 (CKD)", Varied = "CrCl", Value = "30"),
-  base_case %>%
-    mutate(CrCl = 90, Profile = "CrCl 90", Varied = "CrCl", Value = "90"),
-  base_case %>%
-    mutate(Hb_gdl = 10, Profile = "Hb 10 (anemia)", Varied = "Hb_gdl", Value = "10"),
-  base_case %>%
-    mutate(Hb_gdl = 15, Profile = "Hb 15", Varied = "Hb_gdl", Value = "15"),
-  base_case %>%
-    mutate(BMI = 20, Profile = "BMI 20", Varied = "BMI", Value = "20"),
-  base_case %>%
-    mutate(BMI = 35, Profile = "BMI 35", Varied = "BMI", Value = "35")
+  base_case,
+  base_case %>% mutate(Sex_M = 0),
+  base_case %>% mutate(Sex_M = 1),
+  base_case %>% mutate(AF = 0),
+  base_case %>% mutate(AF = 1),
+  base_case %>% mutate(Age = 50),
+  base_case %>% mutate(Age = 75),
+  base_case %>% mutate(CrCl = 30),
+  base_case %>% mutate(CrCl = 90),
+  base_case %>% mutate(Hb_gdl = 10),
+  base_case %>% mutate(Hb_gdl = 15),
+  base_case %>% mutate(BMI = 20),
+  base_case %>% mutate(BMI = 35)
 )
-# Compute thresholds for each row
-threshold_sensitivity <- sensitivity_profiles %>%
-  rowwise() %>%
+
+# Function to compute thresholds using recalibrated Kasahara
+compute_threshold_row <- function(covars, recal_I, recal_S) {
+  tibble(
+    BNP_for_NT100 = get_BNP_for_NT_kasahara_recal(100, covars, recal_I, recal_S),
+    BNP_for_NT200 = get_BNP_for_NT_kasahara_recal(200, covars, recal_I, recal_S),
+    BNP_for_NT1500 = get_BNP_for_NT_kasahara_recal(1500, covars, recal_I, recal_S)
+  )
+}
+
+# Compute thresholds using recalibrated Kasahara model
+if (exists("kasahara_recal_params") && length(kasahara_recal_params) == 2) {
+  recal_I <- kasahara_recal_params[1]
+  recal_S <- kasahara_recal_params[2]
+
+  threshold_sensitivity <- sensitivity_profiles %>%
+    rowwise() %>%
+    mutate(
+      BNP_for_NT100 = get_BNP_for_NT_kasahara_recal(
+        100, pick(Age, BMI, CrCl, Hb_gdl, Sex_M, AF), recal_I, recal_S
+      ),
+      BNP_for_NT200 = get_BNP_for_NT_kasahara_recal(
+        200, pick(Age, BMI, CrCl, Hb_gdl, Sex_M, AF), recal_I, recal_S
+      ),
+      BNP_for_NT1500 = get_BNP_for_NT_kasahara_recal(
+        1500, pick(Age, BMI, CrCl, Hb_gdl, Sex_M, AF), recal_I, recal_S
+      )
+    ) %>%
+    ungroup()
+} else {
+  # Fallback to protocol model if Kasahara recal params not available
+  threshold_sensitivity <- sensitivity_profiles %>%
+    rowwise() %>%
+    mutate(
+      BNP_for_NT100 = get_BNP_for_NT_new_model(
+        100, pick(Age, BMI, CrCl, Hb_gdl, Sex_M, AF), fit_ols, log10_recal_params, FALSE
+      ),
+      BNP_for_NT200 = get_BNP_for_NT_new_model(
+        200, pick(Age, BMI, CrCl, Hb_gdl, Sex_M, AF), fit_ols, log10_recal_params, FALSE
+      ),
+      BNP_for_NT1500 = get_BNP_for_NT_new_model(
+        1500, pick(Age, BMI, CrCl, Hb_gdl, Sex_M, AF), fit_ols, log10_recal_params, FALSE
+      )
+    ) %>%
+    ungroup()
+}
+
+# Round BNP thresholds and convert Sex to label
+threshold_sensitivity <- threshold_sensitivity %>%
   mutate(
-    BNP_for_NT100 = get_BNP_for_NT_new_model(
-      100,
-      pick(-Profile, -Varied, -Value),
-      fit_ols,
-      log10_recal_params,
-      FALSE
-    ),
-    BNP_for_NT200 = get_BNP_for_NT_new_model(
-      200,
-      pick(-Profile, -Varied, -Value),
-      fit_ols,
-      log10_recal_params,
-      FALSE
-    ),
-    BNP_for_NT1500 = get_BNP_for_NT_new_model(
-      1500,
-      pick(-Profile, -Varied, -Value),
-      fit_ols,
-      log10_recal_params,
-      FALSE
-    )
+    across(starts_with("BNP_for"), round),
+    Sex = ifelse(Sex_M == 0, "Female", ifelse(Sex_M == 1, "Male", "0.5")),
+    Age = round(Age, 0),
+    BMI = round(BMI, 1),
+    CrCl = round(CrCl, 0),
+    Hb = round(Hb_gdl, 1)
   ) %>%
-  ungroup() %>%
-  select(Profile, Varied, Value, starts_with("BNP_for")) %>%
-  mutate(across(starts_with("BNP_for"), round))
+  select(Age, BMI, CrCl, Hb, Sex, AF, BNP_for_NT100, BNP_for_NT200, BNP_for_NT1500)
+
 print("BNP Threshold Sensitivity to Individual Covariates:")
 print(threshold_sensitivity)
 if (isTRUE(CONFIG$write_csv_outputs)) {
@@ -220,10 +254,6 @@ if (nrow(logit_md) < 30) {
   )
   table_a <- drop_part_column(table_a)
   print(table_a)
-  save_as_docx(
-    table_a,
-    path = output_path("outcome_table_A_ntprobnp_cat.docx")
-  )
 
   # Model C: Predicted (Recalibrated Median, PaBa) NT-proBNP categories vs. Outcome
   model_c_glm <- glm(
@@ -247,10 +277,6 @@ if (nrow(logit_md) < 30) {
   )
   table_c <- drop_part_column(table_c)
   print(table_c)
-  save_as_docx(
-    table_c,
-    path = output_path("outcome_table_C_pred_new_model_cat.docx")
-  )
 
   print("Finished fitting logistic models.")
 
@@ -507,54 +533,6 @@ if (nrow(logit_md) < 30) {
     }
   }
 
-  if (!is.null(contrast_dfs$NTproBNP)) {
-    p1 <- plot_contrast_df(
-      contrast_dfs$NTproBNP,
-      x_label = plot_xlabels$NTproBNP,
-      x_axis_limits = x_axis_limits,
-      y_axis_limits = y_axis_limits
-    )
-    ggsave(
-      output_path('outcome_assoc_ntprobnp.png'),
-      p1,
-      h = 5,
-      w = 5,
-      dpi = 300
-    )
-  }
-
-  if (!is.null(contrast_dfs$BNP)) {
-    p2 <- plot_contrast_df(
-      contrast_dfs$BNP,
-      x_label = plot_xlabels$BNP,
-      x_axis_limits = x_axis_limits,
-      y_axis_limits = y_axis_limits
-    )
-    ggsave(
-      output_path('outcome_assoc_bnp.png'),
-      p2,
-      h = 5,
-      w = 5,
-      dpi = 300
-    )
-  }
-
-  if (!is.null(contrast_dfs$pred_ntprobnp_new_median)) {
-    p3 <- plot_contrast_df(
-      contrast_dfs$pred_ntprobnp_new_median,
-      x_label = plot_xlabels$pred_ntprobnp_new_median,
-      x_axis_limits = x_axis_limits,
-      y_axis_limits = y_axis_limits
-    )
-    ggsave(
-      output_path('outcome_assoc_pred_new_model.png'),
-      p3,
-      h = 5,
-      w = 5,
-      dpi = 300
-    )
-  }
-
   if (length(contrast_dfs) >= 2) {
     combined_df <- bind_rows(contrast_dfs)
     combined_colors <- setNames(
@@ -571,6 +549,10 @@ if (nrow(logit_md) < 30) {
           levels = names(combined_colors)
         )
       )
+
+    # Create separate x-axis breaks: NT-proBNP panels use 0-4000, BNP uses free scale
+    # Using explicit breaks that will show appropriately in each panel
+    ntprobnp_breaks <- c(0, 1000, 2000, 3000, 4000)
 
     p_combined <- ggplot(
       combined_df,
@@ -592,11 +574,11 @@ if (nrow(logit_md) < 30) {
         color = PLOT_STYLE$colors$neutral
       ) +
       scale_y_log10(
-        breaks = c(1, 2.5, 5, 10, 15, 30, 50, 100),
-        labels = scales::label_number(accuracy = 0.1)
+        breaks = c(1, 5, 10, 20, 40, 100),
+        labels = scales::label_number(accuracy = 1)
       ) +
       scale_x_continuous(
-        breaks = scales::breaks_extended(n = 4),
+        breaks = ntprobnp_breaks,
         labels = scales::label_number(accuracy = 1, big.mark = ","),
         expand = expansion(mult = c(0.03, 0.06))
       ) +
@@ -608,7 +590,7 @@ if (nrow(logit_md) < 30) {
         y = "Odds Ratio"
       ) +
       my_theme +
-      coord_cartesian(ylim = y_axis_limits) +
+      coord_cartesian(ylim = c(1, 100)) +
       theme(
         strip.text = element_text(size = rel(0.95)),
         axis.text.x = element_text(angle = 0, hjust = 0.5),

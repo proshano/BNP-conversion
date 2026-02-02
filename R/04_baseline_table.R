@@ -173,10 +173,34 @@ final_var_labels <- var_labels_list[
 ]
 
 # --- Calculate Missing Counts for Footnote ---
+# Map variable names to reader-friendly labels for footnote
+footnote_var_labels <- c(
+  CrCl = "Creatinine Clearance",
+  Hb_gdl = "Hemoglobin",
+  DM = "Diabetes",
+  Age = "Age",
+  BMI = "Body Mass Index",
+  BNP = "BNP",
+  NTproBNP = "NT-proBNP",
+  AF = "Atrial Fibrillation",
+  CAD = "Coronary Artery Disease",
+  PVD = "Peripheral Vascular Disease",
+  stroke_tia = "Stroke/TIA",
+  copd = "COPD",
+  cancer = "Cancer",
+  chf = "Heart Failure",
+  HTN = "Hypertension",
+  OSA = "Sleep Apnea",
+  SurgeryCategory = "Surgery Category"
+)
+
 missing_counts <- sapply(data_for_table1, function(x) sum(is.na(x)))
 missing_counts_text <- names(missing_counts[missing_counts > 0]) %>%
   {
-    paste0(., " (", missing_counts[missing_counts > 0], ")")
+    # Use friendly names if available, otherwise use original name
+    friendly_names <- ifelse(. %in% names(footnote_var_labels),
+                              footnote_var_labels[.], .)
+    paste0(friendly_names, " (", missing_counts[missing_counts > 0], ")")
   } %>%
   paste(collapse = "; ")
 
@@ -238,21 +262,11 @@ tryCatch(
         all_stat_cols() ~ "**Overall (N = {N})**"
       ) %>%
       modify_caption(
-        "**Table 1: Baseline Characteristics of Initial Cohort**"
+        "**Table 1: Baseline Characteristics of Study Cohort**"
       ) %>%
       bold_labels()
 
     print(baseline_table_final)
-
-    # Save table as DOCX using flextable
-    baseline_flextable <- as_flex_table(baseline_table_final)
-    save_as_docx(
-      baseline_flextable,
-      path = output_path(
-        "baseline_characteristics_gtsummary_initial_cohort.docx"
-      )
-    )
-    print("Baseline Table 1 (Initial Cohort) saved successfully.")
   },
   error = function(e) {
     print(paste("Error generating Baseline Table 1:", e$message))

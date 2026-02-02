@@ -12,7 +12,7 @@ CONFIG <- list(
   binary_threshold = 300, # NT-proBNP threshold for binary metrics
   class_breaks = c(100, 200, 1500), # NT-proBNP thresholds for multi-class metrics
   rcs_knots = 3, # Number of knots for restricted cubic splines
-  bootstrap_reps = 200, # Set to 1000 for protocol-level bootstrapping
+  bootstrap_reps = 100, # Set to 1000 for protocol-level bootstrapping
   bootstrap_cores = 10, # Multicore bootstrapping
   kasahara_crcl_knots = c(56.5, 72.4, 93.7), # Knots from Kasahara paper
   log10_bnp_interval = log10(c(1, 50000)), # Interval for root finding (log10 scale)

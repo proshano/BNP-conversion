@@ -57,6 +57,7 @@ binary_metrics_set <- metric_set(sens, spec, ppv, npv)
 continuous_metrics_set <- metric_set(rmse, rsq)
 
 # --- Plotting Helpers ---
+# Simple comma formatting for axis tick labels (no units - units go in axis title)
 lblr <- scales::label_comma()
 
 PLOT_STYLE <- list(
@@ -615,6 +616,143 @@ predict_ntprobnp_kasahara <- function(BNP, Age, BMI, Hb_gdl, CrCl, Sex_M, AF) {
   return(result)
 }
 
+# --- Kasahara-like Model (same predictors as Kasahara, re-estimated on new data) ---
+# Kasahara predictors: log10(BNP), Age, BMI, Hb, CrCl (RCS), Sex, AF
+# This is an ADDITIVE model (no interactions) matching Kasahara's structure
+fit_kasahara_like_model <- function(data, knots = CONFIG$rcs_knots) {
+  required_cols <- c(
+    "log10_ntprobnp",
+    "Age",
+    "CrCl",
+    "log10_bnp",
+    "Sex_M",
+    "AF",
+    "BMI",
+    "Hb_gdl"
+  )
+  if (!all(required_cols %in% names(data))) {
+    missing_cols <- setdiff(required_cols, names(data))
+    stop(
+      "Missing required columns for Kasahara-like model: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  data_model <- data[, required_cols, drop = FALSE]
+  if (nrow(na.omit(data_model)) < 20) {
+    warning("Less than 20 complete cases for Kasahara-like model fitting.")
+    return(NULL)
+  }
+  # Additive model matching Kasahara structure (no interactions)
+  # Kasahara uses: log10(BNP), Age, BMI, Hb, CrCl (with RCS), Sex, AF
+  frml <- formula(glue(
+    "log10_ntprobnp ~ rcs(log10_bnp, {knots}) + rcs(Age, {knots}) +
+                      rcs(CrCl, {knots}) + Sex_M + AF +
+                      rcs(BMI, {knots}) + rcs(Hb_gdl, {knots})"
+  ))
+  dd_base <- tryCatch(
+    datadist(data_model),
+    error = function(e) {
+      warning("datadist failed for Kasahara-like model: ", e$message)
+      return(NULL)
+    }
+  )
+  if (is.null(dd_base)) {
+    return(NULL)
+  }
+  # Assign to global environment for rms to find it
+  assign("dd_base", dd_base, envir = .GlobalEnv)
+  old_datadist <- options("datadist")
+  options(datadist = "dd_base")
+  on.exit({
+    options(old_datadist)
+    if (exists("dd_base", envir = .GlobalEnv)) {
+      rm("dd_base", envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  fit <- tryCatch(
+    ols(
+      formula = frml,
+      data = data_model,
+      x = TRUE,
+      y = TRUE,
+      na.action = na.omit
+    ),
+    error = function(e) {
+      warning("Kasahara-like model fitting failed: ", e$message)
+      return(NULL)
+    }
+  )
+  return(fit)
+}
+
+# --- Protocol Model (Kasahara predictors + CrCl*Age*BNP interaction per protocol) ---
+# Per protocol: "The model will be extended with an interaction term between
+# creatinine clearance, age, and BNP to determine if the interaction term
+# improves the precision of the NT-proBNP estimates."
+fit_protocol_model <- function(data, knots = CONFIG$rcs_knots) {
+  required_cols <- c(
+    "log10_ntprobnp",
+    "Age",
+    "CrCl",
+    "log10_bnp",
+    "Sex_M",
+    "AF",
+    "BMI",
+    "Hb_gdl"
+  )
+  if (!all(required_cols %in% names(data))) {
+    missing_cols <- setdiff(required_cols, names(data))
+    stop(
+      "Missing required columns for protocol model: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  data_model <- data[, required_cols, drop = FALSE]
+  if (nrow(na.omit(data_model)) < 20) {
+    warning("Less than 20 complete cases for protocol model fitting.")
+    return(NULL)
+  }
+  # Protocol model: Kasahara predictors + 3-way interaction (Age * CrCl * log10_bnp)
+  frml <- formula(glue(
+    "log10_ntprobnp ~ rcs(log10_bnp, {knots}) * rcs(Age, {knots}) * rcs(CrCl, {knots}) +
+                      Sex_M + AF + rcs(BMI, {knots}) + rcs(Hb_gdl, {knots})"
+  ))
+  dd_prot <- tryCatch(
+    datadist(data_model),
+    error = function(e) {
+      warning("datadist failed for protocol model: ", e$message)
+      return(NULL)
+    }
+  )
+  if (is.null(dd_prot)) {
+    return(NULL)
+  }
+  # Assign to global environment for rms to find it
+  assign("dd_prot", dd_prot, envir = .GlobalEnv)
+  old_datadist <- options("datadist")
+  options(datadist = "dd_prot")
+  on.exit({
+    options(old_datadist)
+    if (exists("dd_prot", envir = .GlobalEnv)) {
+      rm("dd_prot", envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  fit <- tryCatch(
+    ols(
+      formula = frml,
+      data = data_model,
+      x = TRUE,
+      y = TRUE,
+      na.action = na.omit
+    ),
+    error = function(e) {
+      warning("Protocol model fitting failed: ", e$message)
+      return(NULL)
+    }
+  )
+  return(fit)
+}
+
 # --- New Model Fitting Function (log10 scale, matching Kasahara) ---
 fit_new_model_ols <- function(data, knots = CONFIG$rcs_knots) {
   required_cols <- c(
@@ -732,6 +870,74 @@ get_BNP_for_NT_new_model <- function(
       return(NULL)
     }
   )
+  if (!is.null(root_result)) {
+    return(10^root_result$root)
+  } else {
+    return(NA_real_)
+  }
+}
+
+# --- Root Finding Function for Recalibrated Kasahara Model ---
+# Finds BNP value that produces target NT-proBNP using the recalibrated Kasahara equation
+get_BNP_for_NT_kasahara_recal <- function(
+  target_NT,
+  covars,
+  recal_intercept,
+  recal_slope
+) {
+  # Extract covariate values
+  Age <- as.numeric(covars$Age)
+  BMI <- as.numeric(covars$BMI)
+  CrCl <- as.numeric(covars$CrCl)
+  Hb_gdl <- as.numeric(covars$Hb_gdl)
+  Sex_M <- as.numeric(covars$Sex_M)
+  AF <- as.numeric(covars$AF)
+
+  # Validate inputs
+  if (!all(is.finite(c(Age, BMI, CrCl, Hb_gdl, Sex_M, AF, recal_intercept, recal_slope)))) {
+    warning("Invalid covariates or recalibration parameters.")
+    return(NA_real_)
+  }
+
+  # Objective function: find BNP where recalibrated prediction equals target
+  objective_function <- function(log10_bnp_val) {
+    BNP_val <- 10^log10_bnp_val
+    # Get Kasahara prediction
+    kasahara_pred <- predict_ntprobnp_kasahara(
+      BNP = BNP_val,
+      Age = Age,
+      BMI = BMI,
+      Hb_gdl = Hb_gdl,
+      CrCl = CrCl,
+      Sex_M = Sex_M,
+      AF = AF
+    )
+    if (!is.finite(kasahara_pred) || kasahara_pred <= 0) {
+      return(Inf)
+    }
+    # Apply recalibration: 10^(I + S × log10(kasahara_pred))
+    recal_pred <- 10^(recal_intercept + recal_slope * log10(kasahara_pred))
+    return(recal_pred - target_NT)
+  }
+
+  # Use root finding
+  root_result <- tryCatch(
+    {
+      uniroot(
+        objective_function,
+        interval = CONFIG$log10_bnp_interval,
+        extendInt = "yes",
+        tol = 1e-5
+      )
+    },
+    error = function(e) {
+      warning(glue(
+        "Could not find root for target_NT = {target_NT}: {e$message}"
+      ))
+      return(NULL)
+    }
+  )
+
   if (!is.null(root_result)) {
     return(10^root_result$root)
   } else {

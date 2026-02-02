@@ -7,6 +7,175 @@ print("--- Starting Section 4: New Model Development & Evaluation ---")
 # Use the final 'analysis_data' cohort
 md <- analysis_data
 
+#===============================================================================
+# Section 4A: Nested Model Comparison - Do interactions help?
+# Per protocol: "The model will be extended with an interaction term between
+# creatinine clearance, age, and BNP to determine if the interaction term
+# improves the precision of the NT-proBNP estimates."
+#
+# Compares: (1) Recalibrated Kasahara (2-param adjustment)
+#           (2) Kasahara-like (re-estimated, additive)
+#           (3) Protocol model (+ CrCl*Age*BNP interactions)
+#===============================================================================
+print("--- Section 4A: Nested Model Comparison ---")
+
+# --- Fit Kasahara-like model (same predictors as Kasahara, re-estimated) ---
+# Kasahara predictors: log10(BNP), Age, BMI, Hb, CrCl (RCS), Sex, AF (ADDITIVE)
+print("Fitting Kasahara-like model (same predictors, re-estimated on this study's data)...")
+fit_base <- fit_kasahara_like_model(md, knots = CONFIG$rcs_knots)
+if (is.null(fit_base)) {
+  stop("Kasahara-like model fitting failed. Cannot proceed with comparison.")
+}
+print("Kasahara-like model (base, additive) summary:")
+print(fit_base)
+
+# --- Fit Protocol model (Kasahara + CrCl*Age*BNP interactions per protocol) ---
+print("Fitting protocol model (Kasahara predictors + CrCl*Age*BNP interactions)...")
+fit_protocol <- fit_protocol_model(md, knots = CONFIG$rcs_knots)
+if (is.null(fit_protocol)) {
+  warning("Protocol model fitting failed. Skipping nested comparison.")
+} else {
+  print("Protocol model (with interactions) summary:")
+  print(fit_protocol)
+}
+
+# --- Likelihood Ratio Test: Additive vs Interaction model ---
+if (!is.null(fit_base) && !is.null(fit_protocol)) {
+  print("--- Likelihood Ratio Test: Additive vs Interaction Model ---")
+
+  # Get log-likelihoods and df
+  ll_base <- logLik(fit_base)
+  ll_protocol <- logLik(fit_protocol)
+  lr_stat <- 2 * (as.numeric(ll_protocol) - as.numeric(ll_base))
+  df_diff <- attr(ll_protocol, "df") - attr(ll_base, "df")
+  p_value <- pchisq(lr_stat, df_diff, lower.tail = FALSE)
+
+  # Calculate R² change
+  r2_base <- fit_base$stats["R2"]
+  r2_protocol <- fit_protocol$stats["R2"]
+  r2_change <- r2_protocol - r2_base
+
+  # Calculate RMSE change (on log10 scale)
+  sigma_base <- fit_base$stats["Sigma"]
+  sigma_protocol <- fit_protocol$stats["Sigma"]
+
+  # Summary table
+  nested_model_comparison <- tibble(
+    comparison = "Protocol (interactions) vs Additive (Kasahara-like)",
+    base_predictors = "log10(BNP), Age, CrCl, Sex, AF, BMI, Hb (additive)",
+    added_terms = "CrCl * Age * log10(BNP) interactions",
+    n = fit_base$stats["n"],
+    df_base = attr(ll_base, "df"),
+    df_protocol = attr(ll_protocol, "df"),
+    df_difference = df_diff,
+    lr_chi_sq = lr_stat,
+    p_value = p_value,
+    r2_base = r2_base,
+    r2_protocol = r2_protocol,
+    r2_change = r2_change,
+    rmse_base_log10 = sigma_base,
+    rmse_protocol_log10 = sigma_protocol,
+    rmse_change_log10 = sigma_protocol - sigma_base,
+    aic_base = AIC(fit_base),
+    aic_protocol = AIC(fit_protocol),
+    bic_base = BIC(fit_base),
+    bic_protocol = BIC(fit_protocol)
+  )
+
+  print("Nested Model Comparison Results:")
+  print(nested_model_comparison %>% select(
+    comparison, added_terms, df_difference, lr_chi_sq, p_value,
+    r2_base, r2_protocol, r2_change
+  ))
+
+  # Interpretation
+  cat("\n--- Interpretation ---\n")
+  cat(sprintf("Additive model R²: %.3f\n", r2_base))
+  cat(sprintf("Protocol model (with interactions) R²: %.3f\n", r2_protocol))
+  cat(sprintf("R² improvement from adding interactions: %.4f (%.2f%%)\n",
+              r2_change, r2_change * 100))
+  cat(sprintf("LRT chi-square: %.2f (df=%d), p-value: %.4f\n",
+              lr_stat, df_diff, p_value))
+  if (p_value < 0.05) {
+    cat("Interactions are statistically significant (p < 0.05),\n")
+    cat("but the improvement in R² is minimal.\n")
+  } else {
+    cat("Interactions do NOT significantly improve prediction (p >= 0.05).\n")
+  }
+
+  # Save results
+  write_rds(
+    nested_model_comparison,
+    output_path('nested_model_comparison.rds')
+  )
+  if (isTRUE(CONFIG$write_csv_outputs)) {
+    write_csv(
+      nested_model_comparison,
+      output_path('nested_model_comparison.csv')
+    )
+  }
+
+  # --- Compare all three approaches: Recalibrated Kasahara vs Re-estimated vs Protocol ---
+  print("--- Comparison: Recalibrated Kasahara vs Re-estimated vs Protocol ---")
+
+  # Use analysis_data_raw which has recalibrated Kasahara predictions from Section 2
+  md_comparison <- analysis_data_raw %>%
+    filter(
+      is.finite(log10_ntprobnp) &
+        is.finite(pred_ntprobnp_kasahara) &
+        is.finite(pred_ntprobnp_kasahara_recal_ols)
+    )
+
+  # Recalibrated Kasahara (from Section 2)
+  md_comparison$pred_recal_kasahara <- md_comparison$pred_ntprobnp_kasahara_recal_ols
+
+  # Re-estimated Kasahara-like model predictions (additive)
+  md_comparison$log10_pred_base <- predict(fit_base, newdata = md_comparison)
+  md_comparison$pred_base <- 10^md_comparison$log10_pred_base
+
+  # Protocol model predictions (with interactions)
+  md_comparison$log10_pred_protocol <- predict(fit_protocol, newdata = md_comparison)
+  md_comparison$pred_protocol <- 10^md_comparison$log10_pred_protocol
+
+  # Calculate metrics for each
+  metrics_recal_kasahara <- compute_metrics(
+    md_comparison, "NTproBNP", "pred_recal_kasahara"
+  ) %>% mutate(model = "Recalibrated Kasahara (2 params)")
+
+  metrics_base <- compute_metrics(
+    md_comparison, "NTproBNP", "pred_base"
+  ) %>% mutate(model = "Re-estimated (additive)")
+
+  metrics_protocol <- compute_metrics(
+    md_comparison, "NTproBNP", "pred_protocol"
+  ) %>% mutate(model = "Protocol (+ interactions)")
+
+  # Combine and compare key metrics
+  all_metrics <- bind_rows(metrics_recal_kasahara, metrics_base, metrics_protocol)
+
+  comparison_summary <- all_metrics %>%
+    filter(.metric %in% c("rmse_log10", "rsq_log10", "paba_slope_log10")) %>%
+    select(model, .metric, .estimate) %>%
+    pivot_wider(names_from = .metric, values_from = .estimate) %>%
+    arrange(desc(rsq_log10))
+
+  print("Performance Comparison (all approaches):")
+  print(comparison_summary)
+
+  write_rds(
+    comparison_summary,
+    output_path('model_comparison_summary.rds')
+  )
+  if (isTRUE(CONFIG$write_csv_outputs)) {
+    write_csv(
+      comparison_summary,
+      output_path('model_comparison_summary.csv')
+    )
+  }
+}
+
+print("--- Finished Section 4A ---")
+
 # --- Fit Initial OLS Model (log10 scale) ---
 print("Fitting initial OLS model on log10(NTproBNP)...")
 dd <- datadist(md)
@@ -95,22 +264,6 @@ calibrate_ols_boot <- tryCatch(
     return(NULL)
   }
 )
-if (!is.null(calibrate_ols_boot)) {
-  bias_cal_plot <- make_bias_corrected_calibration_plot(
-    calibrate_ols_boot,
-    x_label = "Predicted log10(NT-proBNP)",
-    y_label = "Observed log10(NT-proBNP)"
-  )
-  if (!is.null(bias_cal_plot)) {
-    ggsave(
-      output_path("calibration_curve_new_model_bias_corrected_log10.png"),
-      bias_cal_plot,
-      height = 6,
-      width = 6,
-      dpi = 300
-    )
-  }
-}
 
 # Residual SE on log10 scale
 sigma_ols <- fit_ols$stats['Sigma']
@@ -178,16 +331,6 @@ if (nrow(paba_log10_boot) > 10) {
   )
   print("Bootstrapped Log10-Log10 PaBa Calibration (Median with 95% CI):")
   print(paba_log10_boot_summary)
-  write_rds(
-    paba_log10_boot_summary,
-    output_path('paba_log10_bootstrap_summary.rds')
-  )
-  if (isTRUE(CONFIG$write_csv_outputs)) {
-    write_csv(
-      paba_log10_boot_summary,
-      output_path('paba_log10_bootstrap_summary.csv')
-    )
-  }
 
   # Use bootstrapped median for recalibration (more robust)
   I_log10_paba <- paba_log10_boot_summary$estimate_median[
@@ -236,104 +379,6 @@ if (nrow(md) > 10) {
   )
   print("Apparent Performance Metrics (Recalibrated New Model - PaBa):")
   print(apparent_performance_new)
-  write_rds(
-    apparent_performance_new,
-    output_path('apparent_performance_new_model.rds')
-  )
-  if (isTRUE(CONFIG$write_csv_outputs)) {
-    write_csv(
-      apparent_performance_new,
-      output_path('apparent_performance_new_model.csv')
-    )
-  }
-
-  # Visualize Apparent Performance
-  cal_plot_new_log <- make_calibration_plot(
-    md,
-    "NTproBNP",
-    "pred_ntprobnp_new_median",
-    "New Model (Recalibrated)",
-    TRUE
-  )
-  ggsave(
-    output_path('calibration_plot_new_model_log.png'),
-    cal_plot_new_log,
-    h = 6,
-    w = 6,
-    dpi = 300
-  )
-
-  cal_plot_new_lin <- make_calibration_plot(
-    md,
-    "NTproBNP",
-    "pred_ntprobnp_new_median",
-    "New Model (Recalibrated)",
-    FALSE
-  )
-  ggsave(
-    output_path('calibration_plot_new_model_lin.png'),
-    cal_plot_new_lin,
-    h = 6,
-    w = 6,
-    dpi = 300
-  )
-
-  ba_plot_new_rel <- make_bland_altman_plot(
-    md,
-    "NTproBNP",
-    "pred_ntprobnp_new_median",
-    "New Model (Recalibrated)",
-    "relative"
-  )
-  ggsave(
-    output_path('BA_new_model_relative.png'),
-    ba_plot_new_rel,
-    h = 6,
-    w = 6,
-    dpi = 300
-  )
-
-  ba_plot_new_abs <- make_bland_altman_plot(
-    md,
-    "NTproBNP",
-    "pred_ntprobnp_new_median",
-    "New Model (Recalibrated)",
-    "absolute"
-  )
-  ggsave(
-    output_path('BA_new_model_absolute.png'),
-    ba_plot_new_abs,
-    h = 6,
-    w = 6,
-    dpi = 300
-  )
-
-  # Actual vs Predicted plot
-  avp_new <- make_actual_vs_pred_plot(
-    md,
-    "NTproBNP",
-    "pred_ntprobnp_new_median",
-    "New Model (Recalibrated)",
-    TRUE
-  )
-  ggsave(
-    output_path('actual_vs_pred_new_model.png'),
-    avp_new,
-    h = 6,
-    w = 6,
-    dpi = 300
-  )
-
-  # Passing-Bablok plot (original scale)
-  paba_new_obj <- run_mcreg(
-    md,
-    x_col = pred_ntprobnp_new_median,
-    y_col = NTproBNP
-  )
-  plot_mcreg(
-    paba_new_obj,
-    filename = output_path('paba_plot_new_model.png')
-  )
 } else {
   print("Insufficient data after processing for new model apparent evaluation.")
   apparent_performance_new <- NULL
@@ -470,16 +515,6 @@ if (nrow(optimism_estimates) > 0 && !is.null(apparent_performance_new)) {
 
   print("Optimism-Corrected Performance Metrics (Recalibrated New Model):")
   print(optimism_corrected_final)
-  write_rds(
-    optimism_corrected_final,
-    output_path('optimism_corrected_estimates_new_model.rds')
-  )
-  if (isTRUE(CONFIG$write_csv_outputs)) {
-    write_csv(
-      optimism_corrected_final,
-      output_path('optimism_corrected_estimates_new_model.csv')
-    )
-  }
 } else {
   print(
     "Could not calculate optimism-corrected estimates (insufficient bootstrap results or apparent performance missing)."

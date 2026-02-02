@@ -171,6 +171,175 @@ if (n_eval_kasahara > 10) {
     print("Kasahara (Recalibrated OLS) model performance metrics:")
     print(old_model_errors_recal_ols)
 
+    # --- Optimism Correction for Recalibrated Kasahara (Frank Harrell's method) ---
+    # 1. Apparent performance on full sample (already computed above)
+    # 2. For each bootstrap: fit on bootstrap, calc on bootstrap (θ_boot),
+    #    apply to original, calc on original (θ_orig), optimism = θ_boot - θ_orig
+    # 3. Optimism-corrected = Apparent - mean(Optimism)
+    print(glue(
+      "--- Bootstrapping Optimism Correction for Recalibrated Kasahara ({CONFIG$bootstrap_reps} iterations) ---"
+    ))
+
+    calculate_kasahara_optimism_step <- function(split) {
+      bs_data <- rsample::analysis(split)
+      orig_data <- rsample::assessment(split)
+
+      # Filter to valid data
+      bs_data <- bs_data %>%
+        filter(
+          is.finite(NTproBNP) &
+            is.finite(pred_ntprobnp_kasahara) &
+            NTproBNP > 0 &
+            pred_ntprobnp_kasahara > 0
+        )
+      orig_data <- orig_data %>%
+        filter(
+          is.finite(NTproBNP) &
+            is.finite(pred_ntprobnp_kasahara) &
+            NTproBNP > 0 &
+            pred_ntprobnp_kasahara > 0
+        )
+
+      if (nrow(bs_data) < 20 || nrow(orig_data) < 20) {
+        return(NULL)
+      }
+
+      # Fit OLS recalibration on bootstrap sample
+      bs_fit <- lm(
+        log10(NTproBNP) ~ log10(pred_ntprobnp_kasahara),
+        data = bs_data
+      )
+      I_bs <- coef(bs_fit)[1]
+      S_bs <- coef(bs_fit)[2]
+
+      if (!is.finite(I_bs) || !is.finite(S_bs)) {
+        return(NULL)
+      }
+
+      # Calculate recalibrated predictions using bootstrap-derived parameters
+      bs_data <- bs_data %>%
+        mutate(
+          pred_recal_bs = 10^(I_bs + S_bs * log10(pred_ntprobnp_kasahara))
+        ) %>%
+        filter(is.finite(pred_recal_bs))
+
+      orig_data <- orig_data %>%
+        mutate(
+          pred_recal_bs = 10^(I_bs + S_bs * log10(pred_ntprobnp_kasahara))
+        ) %>%
+        filter(is.finite(pred_recal_bs))
+
+      if (nrow(bs_data) < 10 || nrow(orig_data) < 10) {
+        return(NULL)
+      }
+
+      # Performance on bootstrap sample (apparent on bootstrap)
+      perf_on_bootstrap <- compute_metrics(
+        bs_data,
+        "NTproBNP",
+        "pred_recal_bs"
+      ) %>%
+        select(.metric, .estimator, .estimate_on_bootstrap = .estimate)
+
+      # Performance on original sample using bootstrap-fitted model
+      perf_on_original <- compute_metrics(
+        orig_data,
+        "NTproBNP",
+        "pred_recal_bs"
+      ) %>%
+        select(.metric, .estimator, .estimate_on_original = .estimate)
+
+      # Calculate optimism = bootstrap - original
+      metrics_step <- inner_join(
+        perf_on_bootstrap,
+        perf_on_original,
+        by = c(".metric", ".estimator")
+      ) %>%
+        mutate(optimism = .estimate_on_bootstrap - .estimate_on_original) %>%
+        filter(is.finite(optimism))
+
+      return(metrics_step)
+    }
+
+    # Run bootstrap
+    boots_kasahara <- rsample::bootstraps(
+      data_eval_kasahara,
+      times = CONFIG$bootstrap_reps,
+      apparent = FALSE
+    )
+    optimism_cores <- get_bootstrap_cores()
+    message(glue(
+      "Running Kasahara optimism correction on {optimism_cores} core(s)..."
+    ))
+    kasahara_optimism_list <- parallel::mclapply(
+      boots_kasahara$splits,
+      function(split) {
+        calculate_kasahara_optimism_step(split)
+      },
+      mc.cores = optimism_cores,
+      mc.set.seed = TRUE
+    )
+    kasahara_optimism_estimates <- bind_rows(
+      purrr::keep(kasahara_optimism_list, ~ !is.null(.))
+    )
+
+    # Summarize optimism and calculate corrected estimates
+    if (nrow(kasahara_optimism_estimates) > 10) {
+      kasahara_optimism_summary <- kasahara_optimism_estimates %>%
+        group_by(.metric, .estimator) %>%
+        summarise(
+          mean_optimism = mean(optimism, na.rm = TRUE),
+          n_boots = n(),
+          ci_lower_95 = quantile(.estimate_on_original, probs = 0.025, na.rm = TRUE),
+          ci_upper_95 = quantile(.estimate_on_original, probs = 0.975, na.rm = TRUE),
+          .groups = 'drop'
+        ) %>%
+        filter(is.finite(mean_optimism))
+
+      # Merge with apparent performance
+      kasahara_recal_optimism_corrected <- old_model_errors_recal_ols %>%
+        select(
+          .metric,
+          .estimator,
+          threshold_label,
+          apparent_estimate = .estimate
+        ) %>%
+        inner_join(kasahara_optimism_summary, by = c(".metric", ".estimator")) %>%
+        mutate(optimism_corrected = apparent_estimate - mean_optimism) %>%
+        select(
+          .metric,
+          .estimator,
+          apparent_estimate,
+          mean_optimism,
+          optimism_corrected,
+          ci_lower_95,
+          ci_upper_95,
+          n_boots
+        ) %>%
+        arrange(.metric, .estimator)
+
+      print("Optimism-Corrected Performance Metrics (Recalibrated Kasahara):")
+      print(kasahara_recal_optimism_corrected)
+
+      # Save results
+      write_rds(
+        kasahara_recal_optimism_corrected,
+        output_path('kasahara_recal_optimism_corrected.rds')
+      )
+      if (isTRUE(CONFIG$write_csv_outputs)) {
+        write_csv(
+          kasahara_recal_optimism_corrected,
+          output_path('kasahara_recal_optimism_corrected.csv')
+        )
+      }
+    } else {
+      print("Insufficient bootstrap results for Kasahara optimism correction.")
+      kasahara_recal_optimism_corrected <- NULL
+    }
+
+    # Store recalibration parameters for use elsewhere
+    kasahara_recal_params <- c(kasahara_loglog_intercept_ols, kasahara_loglog_slope_ols)
+
     if (
       is.finite(kasahara_loglog_intercept_paba) &&
         is.finite(kasahara_loglog_slope_paba)
@@ -180,16 +349,6 @@ if (n_eval_kasahara > 10) {
         target_col = "NTproBNP",
         predicted_col = "pred_ntprobnp_kasahara_recal_paba"
       )
-      write_rds(
-        old_model_errors_recal_paba,
-        output_path('kasahara_model_prediction_errors_recal_paba.rds')
-      )
-      if (isTRUE(CONFIG$write_csv_outputs)) {
-        write_csv(
-          old_model_errors_recal_paba,
-          output_path('kasahara_model_prediction_errors_recal_paba.csv')
-        )
-      }
       print("Kasahara (Recalibrated PaBa) model performance metrics:")
       print(old_model_errors_recal_paba)
     } else {
@@ -217,23 +376,6 @@ print("--- Starting Section 3: Visualize Old (Kasahara) Model Performance ---")
 # Use the data specifically filtered for Kasahara evaluation: data_eval_kasahara
 if (exists("data_eval_kasahara") && nrow(data_eval_kasahara) > 10) {
   # Check if data exists and has rows
-  # Actual vs Predicted (Kasahara)
-  avp_kasahara <- make_actual_vs_pred_plot(
-    data = data_eval_kasahara,
-    actual_col = "NTproBNP",
-    pred_col = "pred_ntprobnp_kasahara",
-    model_name = "Kasahara Model",
-    log_scale = TRUE
-  )
-  print_plot(avp_kasahara)
-  ggsave(
-    output_path('actual_vs_pred_kasahara.png'),
-    plot = avp_kasahara,
-    height = 6,
-    width = 6,
-    dpi = 300
-  )
-
   # Calibration plots (Log and Linear Scale)
   cal_plot_old_log <- make_calibration_plot(
     data = data_eval_kasahara,
@@ -246,38 +388,6 @@ if (exists("data_eval_kasahara") && nrow(data_eval_kasahara) > 10) {
   ggsave(
     output_path('calibration_plot_kasahara_log.png'),
     plot = cal_plot_old_log,
-    height = 6,
-    width = 6,
-    dpi = 300
-  )
-
-  cal_plot_old_lin <- make_calibration_plot(
-    data = data_eval_kasahara,
-    actual_col = "NTproBNP",
-    pred_col = "pred_ntprobnp_kasahara", # Use correct data
-    model_name = "Kasahara Model",
-    log_scale = FALSE
-  )
-  print_plot(cal_plot_old_lin)
-  ggsave(
-    output_path('calibration_plot_kasahara_lin.png'),
-    plot = cal_plot_old_lin,
-    height = 6,
-    width = 6,
-    dpi = 300
-  )
-
-  # Log-Log calibration plot (Kasahara)
-  cal_plot_old_loglog <- make_loglog_calibration_plot(
-    data = data_eval_kasahara,
-    actual_col = "NTproBNP",
-    pred_col = "pred_ntprobnp_kasahara",
-    model_name = "Kasahara Model"
-  )
-  print_plot(cal_plot_old_loglog)
-  ggsave(
-    output_path('calibration_plot_kasahara_loglog.png'),
-    plot = cal_plot_old_loglog,
     height = 6,
     width = 6,
     dpi = 300
@@ -300,51 +410,34 @@ if (exists("data_eval_kasahara") && nrow(data_eval_kasahara) > 10) {
       dpi = 300
     )
 
-    avp_kasahara_recal_ols <- make_actual_vs_pred_plot(
+    # Bland-Altman plots for Recalibrated OLS Kasahara
+    ba_kasahara_recal_ols_rel <- make_bland_altman_plot(
       data = data_eval_kasahara,
       actual_col = "NTproBNP",
       pred_col = "pred_ntprobnp_kasahara_recal_ols",
       model_name = "Kasahara Model (Recalibrated OLS)",
-      log_scale = TRUE
+      type = "relative"
     )
-    print_plot(avp_kasahara_recal_ols)
+    print_plot(ba_kasahara_recal_ols_rel)
     ggsave(
-      output_path('actual_vs_pred_kasahara_recal_ols.png'),
-      plot = avp_kasahara_recal_ols,
-      height = 6,
-      width = 6,
-      dpi = 300
-    )
-  }
-
-  # Log-Log calibration plot + actual vs predicted (Kasahara Recalibrated PaBa), if available
-  if ("pred_ntprobnp_kasahara_recal_paba" %in% names(data_eval_kasahara)) {
-    cal_plot_old_loglog_recal_paba <- make_loglog_calibration_plot(
-      data = data_eval_kasahara,
-      actual_col = "NTproBNP",
-      pred_col = "pred_ntprobnp_kasahara_recal_paba",
-      model_name = "Kasahara Model (Recalibrated PaBa)"
-    )
-    print_plot(cal_plot_old_loglog_recal_paba)
-    ggsave(
-      output_path('calibration_plot_kasahara_recal_paba_loglog.png'),
-      plot = cal_plot_old_loglog_recal_paba,
+      output_path('BA_kasahara_recal_ols_relative.png'),
+      plot = ba_kasahara_recal_ols_rel,
       height = 6,
       width = 6,
       dpi = 300
     )
 
-    avp_kasahara_recal_paba <- make_actual_vs_pred_plot(
+    ba_kasahara_recal_ols_abs <- make_bland_altman_plot(
       data = data_eval_kasahara,
       actual_col = "NTproBNP",
-      pred_col = "pred_ntprobnp_kasahara_recal_paba",
-      model_name = "Kasahara Model (Recalibrated PaBa)",
-      log_scale = TRUE
+      pred_col = "pred_ntprobnp_kasahara_recal_ols",
+      model_name = "Kasahara Model (Recalibrated OLS)",
+      type = "absolute"
     )
-    print_plot(avp_kasahara_recal_paba)
+    print_plot(ba_kasahara_recal_ols_abs)
     ggsave(
-      output_path('actual_vs_pred_kasahara_recal_paba.png'),
-      plot = avp_kasahara_recal_paba,
+      output_path('BA_kasahara_recal_ols_absolute.png'),
+      plot = ba_kasahara_recal_ols_abs,
       height = 6,
       width = 6,
       dpi = 300
@@ -382,12 +475,6 @@ if (exists("data_eval_kasahara") && nrow(data_eval_kasahara) > 10) {
     height = 6,
     width = 6,
     dpi = 300
-  )
-
-  # Passing-Bablok plot (use object created in Section 2)
-  plot_mcreg(
-    paba_old_model_obj,
-    filename = output_path('paba_plot_kasahara.png')
   )
 } else {
   print("Insufficient data for Kasahara model visualizations.")
