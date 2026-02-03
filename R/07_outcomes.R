@@ -1,6 +1,6 @@
 #===============================================================================
 # Section 5: Association with Clinical Outcomes (using RECALIBRATED MEDIAN Predictions)
-# Uses log10 scale throughout (matching Kasahara) and PaBa recalibration (per protocol)
+# Uses log10 scale throughout (matching Kasahara) and OLS recalibration
 #===============================================================================
 print("--- Starting Section 5: Association with Clinical Outcomes ---")
 # Use the 'md' dataframe which contains the final recalibrated median predictions
@@ -15,8 +15,8 @@ print("Calculating corresponding BNP thresholds using recalibrated Kasahara mode
 median_covars_for_thresholds <- md %>%
   summarise(
     across(c(Age, BMI, CrCl, Hb_gdl), \(x) median(x, na.rm = TRUE)),
-    Sex_M = 0.5, # Use midpoint for sex
-    AF = Mode(AF, na.rm = TRUE), # Use Mode for binary
+    Sex_M = 0, # Female (base case)
+    AF = 0,    # No AF (base case)
     .groups = 'drop'
   )
 print("Median covariate grid for threshold calculation:")
@@ -68,21 +68,16 @@ print("Computing sensitivity of BNP thresholds to individual covariates...")
 base_case <- median_covars_for_thresholds
 
 # Define variations: one parameter at a time
+# Base case uses Female (Sex_M=0) and No AF (AF=0) with median continuous values
 # Table will show each covariate value as a column
 sensitivity_profiles <- bind_rows(
-  base_case,
-  base_case %>% mutate(Sex_M = 0),
-  base_case %>% mutate(Sex_M = 1),
-  base_case %>% mutate(AF = 0),
-  base_case %>% mutate(AF = 1),
-  base_case %>% mutate(Age = 50),
-  base_case %>% mutate(Age = 75),
-  base_case %>% mutate(CrCl = 30),
-  base_case %>% mutate(CrCl = 90),
-  base_case %>% mutate(Hb_gdl = 10),
-  base_case %>% mutate(Hb_gdl = 15),
-  base_case %>% mutate(BMI = 20),
-  base_case %>% mutate(BMI = 35)
+  base_case,                             # Base case: Female, No AF, median continuous
+  base_case %>% mutate(Sex_M = 1),       # Male
+  base_case %>% mutate(AF = 1),          # AF = Yes
+  base_case %>% mutate(Age = 50),        # Age 50
+  base_case %>% mutate(CrCl = 30),       # CrCl 30
+  base_case %>% mutate(Hb_gdl = 10),     # Hb 10
+  base_case %>% mutate(BMI = 20)         # BMI 20
 )
 
 # Function to compute thresholds using recalibrated Kasahara
@@ -114,7 +109,7 @@ if (exists("kasahara_recal_params") && length(kasahara_recal_params) == 2) {
     ) %>%
     ungroup()
 } else {
-  # Fallback to protocol model if Kasahara recal params not available
+  # Fallback to extended model if Kasahara recal params not available
   threshold_sensitivity <- sensitivity_profiles %>%
     rowwise() %>%
     mutate(
@@ -131,11 +126,12 @@ if (exists("kasahara_recal_params") && length(kasahara_recal_params) == 2) {
     ungroup()
 }
 
-# Round BNP thresholds and convert Sex to label
+# Round BNP thresholds and convert Sex/AF to labels
 threshold_sensitivity <- threshold_sensitivity %>%
   mutate(
     across(starts_with("BNP_for"), round),
     Sex = ifelse(Sex_M == 0, "Female", ifelse(Sex_M == 1, "Male", "0.5")),
+    AF = ifelse(AF == 0, "No", ifelse(AF == 1, "Yes", as.character(AF))),
     Age = round(Age, 0),
     BMI = round(BMI, 1),
     CrCl = round(CrCl, 0),
@@ -208,6 +204,35 @@ if (nrow(logit_md) < 30) {
     mutate(
       across(ends_with("_cat"), ~ fct_relevel(.x, levels(.)[1]))
     )
+
+  # --- Compute n/events per category for reporting ---
+  ntprobnp_cat_summary <- logit_md %>%
+    group_by(NTproBNP_cat) %>%
+    summarise(
+      n = n(),
+      events = sum(composite_outcome == 1, na.rm = TRUE),
+      .groups = 'drop'
+    ) %>%
+    rename(Category = NTproBNP_cat)
+
+  pred_cat_summary <- logit_md %>%
+    group_by(pred_new_median_cat) %>%
+    summarise(
+      n = n(),
+      events = sum(composite_outcome == 1, na.rm = TRUE),
+      .groups = 'drop'
+    ) %>%
+    rename(Category = pred_new_median_cat)
+
+  print("NT-proBNP category counts (measured):")
+  print(ntprobnp_cat_summary)
+  print("NT-proBNP category counts (predicted):")
+  print(pred_cat_summary)
+
+  # Save for report use
+  saveRDS(ntprobnp_cat_summary, output_path("ntprobnp_cat_summary.rds"))
+  saveRDS(pred_cat_summary, output_path("pred_cat_summary.rds"))
+
   # --- Fit Logistic Regression Models ---
   # Categorical logistic regression:
   # logit(P(outcome=1)) = a0 + sum_j a_j * I(category=j), reference = lowest category.
@@ -232,7 +257,7 @@ if (nrow(logit_md) < 30) {
     }
     ft
   }
-  # Model A: Measured NT-proBNP categories vs. Outcome
+  # Measured NT-proBNP categories vs outcome
   model_a_glm <- glm(
     composite_outcome ~ NTproBNP_cat,
     data = logit_md,
@@ -250,12 +275,12 @@ if (nrow(logit_md) < 30) {
     exponentiate = TRUE,
     gof_map = NA,
     output = "flextable",
-    title = 'Table A: Association between Measured NT-proBNP Categories and Composite Outcome (Odds Ratios)'
+    title = 'Association between Measured NT-proBNP Categories and Composite Outcome (Odds Ratios)'
   )
   table_a <- drop_part_column(table_a)
   print(table_a)
 
-  # Model C: Predicted (Recalibrated Median, PaBa) NT-proBNP categories vs. Outcome
+  # Predicted (recalibrated median, OLS) NT-proBNP categories vs outcome
   model_c_glm <- glm(
     composite_outcome ~ pred_new_median_cat,
     data = logit_md,
@@ -273,7 +298,7 @@ if (nrow(logit_md) < 30) {
     exponentiate = TRUE,
     gof_map = NA,
     output = "flextable",
-    title = 'Table C: Association between Predicted NT-proBNP Categories (New Model) and Composite Outcome (Odds Ratios)'
+    title = 'Association between Predicted NT-proBNP Categories (New Model) and Composite Outcome (Odds Ratios)'
   )
   table_c <- drop_part_column(table_c)
   print(table_c)
@@ -488,7 +513,7 @@ if (nrow(logit_md) < 30) {
     error = function(e) warning("Failed to model BNP association: ", e$message)
   )
 
-  # 3. Predicted (Recalibrated Median, PaBa) NTproBNP vs Outcome
+  # 3. Predicted (Recalibrated Median, OLS) NTproBNP vs Outcome
   tryCatch(
     {
       fit_lrm_3 <- lrm(

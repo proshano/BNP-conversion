@@ -267,7 +267,8 @@ compute_metrics <- function(
   target_col,
   predicted_col,
   binary_threshold = CONFIG$binary_threshold,
-  class_breaks = CONFIG$class_breaks
+  class_breaks = CONFIG$class_breaks,
+  include_paba = FALSE
 ) {
   target_sym <- sym(target_col)
   predicted_sym <- sym(predicted_col)
@@ -379,52 +380,77 @@ compute_metrics <- function(
     warning("OLS calibration failed or insufficient data.")
   }
 
-  # Calibration on LOG10 scale (Passing-Bablok, per protocol)
-  paba_model <- tryCatch(
-    {
-      mcreg(
-        x = d_processed$log10_predicted,
-        y = d_processed$log10_target,
-        method.reg = "PaBa",
-        na.rm = TRUE
-      )
-    },
-    error = function(e) NULL
+  paba_m <- tibble(
+    .metric = character(),
+    .estimator = character(),
+    .estimate = numeric()
   )
+  if (isTRUE(include_paba)) {
+    # Calibration on LOG10 scale (Passing-Bablok, per protocol)
+    paba_model <- tryCatch(
+      {
+        mcreg(
+          x = d_processed$log10_predicted,
+          y = d_processed$log10_target,
+          method.reg = "PaBa",
+          na.rm = TRUE
+        )
+      },
+      error = function(e) NULL
+    )
 
-  if (!is.null(paba_model) && is_mcr_result(paba_model)) {
-    paba_results_para <- paba_model@para
-    paba_m <- tibble(
-      .metric = c(
-        "paba_intercept_log10",
-        "paba_intercept_lower_log10",
-        "paba_intercept_upper_log10",
-        "paba_slope_log10",
-        "paba_slope_lower_log10",
-        "paba_slope_upper_log10"
-      ),
-      .estimator = "PaBa_log10",
-      .estimate = c(
-        paba_results_para[1, "EST"],
-        paba_results_para[1, "LCI"],
-        paba_results_para[1, "UCI"],
-        paba_results_para[2, "EST"],
-        paba_results_para[2, "LCI"],
-        paba_results_para[2, "UCI"]
+    if (!is.null(paba_model) && is_mcr_result(paba_model)) {
+      paba_results_para <- paba_model@para
+      paba_m <- tibble(
+        .metric = c(
+          "paba_intercept_log10",
+          "paba_intercept_lower_log10",
+          "paba_intercept_upper_log10",
+          "paba_slope_log10",
+          "paba_slope_lower_log10",
+          "paba_slope_upper_log10"
+        ),
+        .estimator = "PaBa_log10",
+        .estimate = c(
+          paba_results_para[1, "EST"],
+          paba_results_para[1, "LCI"],
+          paba_results_para[1, "UCI"],
+          paba_results_para[2, "EST"],
+          paba_results_para[2, "LCI"],
+          paba_results_para[2, "UCI"]
+        )
       )
-    )
-  } else {
-    paba_m <- tibble(
-      .metric = character(),
-      .estimator = character(),
-      .estimate = numeric()
-    )
-    warning("Passing-Bablok regression failed or insufficient data.")
+    } else {
+      warning("Passing-Bablok regression failed or insufficient data.")
+    }
   }
 
   binary_label <- glue(
     "{target_col} >= {binary_threshold} vs < {binary_threshold}"
   )
+  metric_keep <- c(
+    "rmse_log10",
+    "rsq_log10",
+    "pearson_r_log10",
+    "weighted_kappa_quadratic",
+    "sens",
+    "spec",
+    "ppv",
+    "npv",
+    "ols_intercept_log10",
+    "ols_slope_log10"
+  )
+  if (isTRUE(include_paba)) {
+    metric_keep <- c(
+      metric_keep,
+      "paba_intercept_log10",
+      "paba_intercept_lower_log10",
+      "paba_intercept_upper_log10",
+      "paba_slope_log10",
+      "paba_slope_lower_log10",
+      "paba_slope_upper_log10"
+    )
+  }
   protocol_metrics <- bind_rows(cont_m, bin_m, w_kappa_m, ols_m, paba_m) %>%
     mutate(
       threshold_label = if_else(
@@ -434,27 +460,7 @@ compute_metrics <- function(
       ),
       model_type = predicted_col
     ) %>%
-    filter(
-      .metric %in%
-        c(
-          "rmse_log10",
-          "rsq_log10",
-          "pearson_r_log10",
-          "weighted_kappa_quadratic",
-          "sens",
-          "spec",
-          "ppv",
-          "npv",
-          "ols_intercept_log10",
-          "ols_slope_log10",
-          "paba_intercept_log10",
-          "paba_intercept_lower_log10",
-          "paba_intercept_upper_log10",
-          "paba_slope_log10",
-          "paba_slope_lower_log10",
-          "paba_slope_upper_log10"
-        )
-    )
+    filter(.metric %in% metric_keep)
   protocol_metrics
 }
 
@@ -685,7 +691,7 @@ fit_kasahara_like_model <- function(data, knots = CONFIG$rcs_knots) {
   return(fit)
 }
 
-# --- Protocol Model (Kasahara predictors + CrCl*Age*BNP interaction per protocol) ---
+# --- Extended Model (Kasahara predictors + CrCl*Age*BNP interaction per protocol) ---
 # Per protocol: "The model will be extended with an interaction term between
 # creatinine clearance, age, and BNP to determine if the interaction term
 # improves the precision of the NT-proBNP estimates."
@@ -703,16 +709,16 @@ fit_protocol_model <- function(data, knots = CONFIG$rcs_knots) {
   if (!all(required_cols %in% names(data))) {
     missing_cols <- setdiff(required_cols, names(data))
     stop(
-      "Missing required columns for protocol model: ",
+      "Missing required columns for extended model: ",
       paste(missing_cols, collapse = ", ")
     )
   }
   data_model <- data[, required_cols, drop = FALSE]
   if (nrow(na.omit(data_model)) < 20) {
-    warning("Less than 20 complete cases for protocol model fitting.")
+    warning("Less than 20 complete cases for extended model fitting.")
     return(NULL)
   }
-  # Protocol model: Kasahara predictors + 3-way interaction (Age * CrCl * log10_bnp)
+  # Extended model: Kasahara predictors + 3-way interaction (Age * CrCl * log10_bnp)
   frml <- formula(glue(
     "log10_ntprobnp ~ rcs(log10_bnp, {knots}) * rcs(Age, {knots}) * rcs(CrCl, {knots}) +
                       Sex_M + AF + rcs(BMI, {knots}) + rcs(Hb_gdl, {knots})"
@@ -720,7 +726,7 @@ fit_protocol_model <- function(data, knots = CONFIG$rcs_knots) {
   dd_prot <- tryCatch(
     datadist(data_model),
     error = function(e) {
-      warning("datadist failed for protocol model: ", e$message)
+      warning("datadist failed for extended model: ", e$message)
       return(NULL)
     }
   )
@@ -746,7 +752,7 @@ fit_protocol_model <- function(data, knots = CONFIG$rcs_knots) {
       na.action = na.omit
     ),
     error = function(e) {
-      warning("Protocol model fitting failed: ", e$message)
+      warning("Extended model fitting failed: ", e$message)
       return(NULL)
     }
   )
@@ -1012,7 +1018,8 @@ make_loglog_calibration_plot <- function(
   data,
   actual_col,
   pred_col,
-  model_name = pred_col
+  model_name = pred_col,
+  show_ci = TRUE
 ) {
   actual_sym <- sym(actual_col)
   pred_sym <- sym(pred_col)
@@ -1030,10 +1037,24 @@ make_loglog_calibration_plot <- function(
   log_fit <- lm(log10(actual) ~ log10(predicted), data = plot_data)
   log_intercept <- coef(log_fit)[1]
   log_slope <- coef(log_fit)[2]
-  plot_data <- plot_data %>%
-    mutate(fit = 10^(log_intercept + log_slope * log10(predicted)))
+
+  # Get 95% CI for the fitted line
+  if (show_ci) {
+    ci_data <- predict(log_fit, interval = "confidence", level = 0.95)
+    plot_data <- plot_data %>%
+      mutate(
+        fit = 10^ci_data[, "fit"],
+        ci_lower = 10^ci_data[, "lwr"],
+        ci_upper = 10^ci_data[, "upr"]
+      )
+  } else {
+    plot_data <- plot_data %>%
+      mutate(fit = 10^(log_intercept + log_slope * log10(predicted)))
+  }
+
   lims <- range(c(plot_data$actual, plot_data$predicted), na.rm = TRUE)
   lims <- c(max(lims[1] * 0.8, 1), lims[2] * 1.2)
+
   p <- ggplot(plot_data, aes(x = predicted, y = actual)) +
     scatter_geom() +
     geom_abline(
@@ -1042,7 +1063,22 @@ make_loglog_calibration_plot <- function(
       color = PLOT_STYLE$colors$identity,
       linetype = "dashed",
       linewidth = PLOT_STYLE$line_width
-    ) +
+    )
+
+  # Add CI ribbon if requested
+  if (show_ci) {
+    # Sort by predicted for smooth ribbon
+    plot_data_sorted <- plot_data %>% arrange(predicted)
+    p <- p +
+      geom_ribbon(
+        data = plot_data_sorted,
+        aes(ymin = ci_lower, ymax = ci_upper),
+        fill = PLOT_STYLE$colors$ribbon,
+        alpha = 0.3
+      )
+  }
+
+  p <- p +
     geom_line(
       aes(y = fit),
       color = PLOT_STYLE$colors$fit,

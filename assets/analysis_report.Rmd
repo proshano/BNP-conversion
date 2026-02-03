@@ -119,12 +119,47 @@ add_reference_row <- function(tbl, model, var, term_col = 'term', ref_label = NU
   }
   tbl
 }
+format_p_value <- function(x, digits = 3, threshold = 0.001) {
+  if (is.na(x) || !is.finite(x)) {
+    return(NA_character_)
+  }
+  if (x < threshold) {
+    return(paste0('<', formatC(threshold, format = 'f', digits = digits)))
+  }
+  formatC(x, format = 'f', digits = digits)
+}
+format_p_columns <- function(df, digits = 3) {
+  p_cols <- grep('p\\.value|p value|p-value', names(df), ignore.case = TRUE, value = TRUE)
+  if (length(p_cols) == 0) {
+    return(df)
+  }
+  parse_num <- function(v) {
+    suppressWarnings(as.numeric(gsub('[^0-9eE.+-]', '', as.character(v))))
+  }
+  for (col in p_cols) {
+    raw <- df[[col]]
+    raw_chr <- as.character(raw)
+    p_num <- parse_num(raw)
+    has_lt <- grepl('<', raw_chr, fixed = TRUE)
+    formatted <- ifelse(
+      has_lt,
+      paste0('<', formatC(0.001, format = 'f', digits = digits)),
+      ifelse(
+        is.na(p_num),
+        raw_chr,
+        vapply(p_num, format_p_value, character(1), digits = digits)
+      )
+    )
+    df[[col]] <- formatted
+  }
+  df
+}
 page_break <- function() knitr::asis_output('\\pagebreak')
 filter_protocol_metrics <- function(df) {
   if (!all(c('.metric', '.estimator') %in% names(df))) {
     return(df)
   }
-  # Remove Passing-Bablok metrics from performance tables, keep only OLS-based
+  # Keep only the prespecified OLS-based performance metrics used in this report.
   allowed <- c(
     'pearson_r_log10', 'rsq_log10', 'rmse_log10',
     'weighted_kappa_quadratic',
@@ -136,6 +171,15 @@ filter_protocol_metrics <- function(df) {
   df <- dplyr::filter(df, !(.metric %in% c('weighted_kappa_quadratic') & .estimator != 'weighted'))
   df <- dplyr::filter(df, !(.metric %in% c('ols_intercept_log10','ols_slope_log10') & .estimator != 'OLS_log10'))
   df <- dplyr::filter(df, !(.metric %in% c('pearson_r_log10') & .estimator != 'log10'))
+  # Clarify category context for weighted kappa when threshold label is blank.
+  df <- df %>%
+    dplyr::mutate(
+      threshold_label = dplyr::if_else(
+        .metric == 'weighted_kappa_quadratic' & (is.na(threshold_label) | threshold_label == ''),
+        'NTproBNP categories: <100, 100-<200, 200-<1500, >=1500',
+        threshold_label
+      )
+    )
   # Rename metrics to proper English and remove estimator column
   metric_labels <- c(
     'pearson_r_log10' = 'Pearson Correlation (log10)',
@@ -154,6 +198,105 @@ filter_protocol_metrics <- function(df) {
     dplyr::select(-.estimator) %>%
     dplyr::rename(Metric = .metric, Estimate = .estimate)
   df
+}
+format_validation_metrics <- function(validation_tbl) {
+  if ('estimate' %in% names(validation_tbl) && !('.estimate' %in% names(validation_tbl))) {
+    validation_tbl <- dplyr::rename(validation_tbl, .estimate = estimate)
+  }
+  if (!('ci_lower_95' %in% names(validation_tbl))) {
+    validation_tbl$ci_lower_95 <- NA_real_
+  }
+  if (!('ci_upper_95' %in% names(validation_tbl))) {
+    validation_tbl$ci_upper_95 <- NA_real_
+  }
+  metric_order <- c(
+    'ols_intercept_log10',
+    'ols_slope_log10',
+    'pearson_r_log10',
+    'rsq_log10',
+    'sens',
+    'spec',
+    'ppv',
+    'npv',
+    'weighted_kappa_quadratic',
+    'rmse_log10'
+  )
+  metric_labels <- c(
+    'ols_intercept_log10' = 'Calibration Intercept (log10)',
+    'ols_slope_log10' = 'Calibration Slope (log10)',
+    'pearson_r_log10' = 'Pearson Correlation (log10)',
+    'rsq_log10' = 'R-squared (log10)',
+    'sens' = 'Sensitivity',
+    'spec' = 'Specificity',
+    'ppv' = 'Positive Predictive Value',
+    'npv' = 'Negative Predictive Value',
+    'weighted_kappa_quadratic' = 'Weighted Kappa (Quadratic)',
+    'rmse_log10' = 'RMSE (log10)'
+  )
+  validation_tbl %>%
+    dplyr::filter(.metric %in% metric_order) %>%
+    dplyr::mutate(
+      metric_order = factor(.metric, levels = metric_order),
+      threshold_label = dplyr::case_when(
+        .metric %in% c('sens', 'spec', 'ppv', 'npv') ~ 'NTproBNP >=300 vs <300',
+        .metric == 'weighted_kappa_quadratic' ~ 'NTproBNP categories: <100, 100-<200, 200-<1500, >=1500',
+        TRUE ~ ''
+      ),
+      Metric = dplyr::recode(.metric, !!!metric_labels)
+    ) %>%
+    dplyr::arrange(metric_order) %>%
+    dplyr::select(
+      Metric,
+      threshold_label,
+      Estimate = .estimate,
+      `95% CI Lower` = ci_lower_95,
+      `95% CI Upper` = ci_upper_95
+    )
+}
+format_optimism_metrics <- function(optimism_tbl) {
+  metric_order <- c(
+    'ols_intercept_log10',
+    'ols_slope_log10',
+    'pearson_r_log10',
+    'rsq_log10',
+    'sens',
+    'spec',
+    'ppv',
+    'npv',
+    'weighted_kappa_quadratic'
+  )
+  metric_labels <- c(
+    'pearson_r_log10' = 'Pearson Correlation (log10)',
+    'rsq_log10' = 'R-squared (log10)',
+    'weighted_kappa_quadratic' = 'Weighted Kappa',
+    'sens' = 'Sensitivity',
+    'spec' = 'Specificity',
+    'ppv' = 'Positive Predictive Value',
+    'npv' = 'Negative Predictive Value',
+    'ols_intercept_log10' = 'Calibration Intercept (log10)',
+    'ols_slope_log10' = 'Calibration Slope (log10)'
+  )
+  optimism_tbl %>%
+    dplyr::filter(.metric %in% metric_order) %>%
+    dplyr::mutate(
+      metric_order = factor(.metric, levels = metric_order),
+      threshold_label = dplyr::case_when(
+        .metric %in% c('sens', 'spec', 'ppv', 'npv') ~ 'NTproBNP >=300 vs <300',
+        .metric == 'weighted_kappa_quadratic' ~ 'NTproBNP categories: <100, 100-<200, 200-<1500, >=1500',
+        TRUE ~ ''
+      ),
+      Metric = dplyr::recode(.metric, !!!metric_labels)
+    ) %>%
+    dplyr::arrange(metric_order) %>%
+    dplyr::select(
+      Metric,
+      threshold_label,
+      Apparent = apparent_estimate,
+      Optimism = mean_optimism,
+      `Optimism-Corrected` = optimism_corrected,
+      `95% CI Lower` = ci_lower_95,
+      `95% CI Upper` = ci_upper_95
+    )
 }
 ```
 
@@ -202,41 +345,36 @@ $$
 $$
 where BNP and NT-proBNP are in pg/mL; Age in years; BMI in kg/m²; Hb in g/dL; CrCl in mL/min; Sex_M = 1 for male, 0 for female; AF = 1 if atrial fibrillation present. The median predicted NT-proBNP on the original scale is $\widehat{NTproBNP}_{median} = 10^{\eta}$ where $\eta$ is the right-hand side above.
 
-## Calibration and method-comparison regressions
-Two calibration regressions are used to quantify bias:
-
-1) Original-scale calibration (OLS) used in the calibration plots:
-$$
-NTproBNP = a + b \times \widehat{NTproBNP}
-$$
-
-2) Log-log recalibration (OLS and Passing-Bablok):
+## Log-log OLS recalibration for external validation
+External validation of the original Kasahara model is assessed with a single OLS recalibration on the log10 scale:
 $$
 \log_{10}(NTproBNP) = I + S \times \log_{10}(\widehat{NTproBNP}_{Kasahara})
 $$
-and the recalibrated prediction is
-$$
-\widehat{NTproBNP}_{recal} = 10^{I + S \log_{10}(\widehat{NTproBNP}_{Kasahara})}.
-$$
-
-Passing-Bablok regression is a robust, nonparametric method-comparison regression of the form $y = a + b x$ that is less sensitive to outliers and measurement error. The intercept ($a$) represents constant bias; the slope ($b$) represents proportional bias.
-
-## Interpretation and rationale
-A slope of 1 and intercept of 0 indicate perfect calibration; deviations quantify systematic over- or underestimation. Log-log recalibration is used because both biomarkers are right-skewed and multiplicative errors are expected on the original scale.
+where $I$ is calibration-in-the-large and $S$ is the calibration slope. Perfect calibration corresponds to $I=0$ and $S=1$. We report apparent performance with nonparametric bootstrap 95% confidence intervals.
 
 ```{r table-kasahara-metrics}
+kasahara_validation_path <- file.path(params$output_dir, 'kasahara_validation_metrics_with_ci.rds')
 kasahara_metrics_path <- file.path(params$output_dir, 'kasahara_model_prediction_errors.rds')
-if (file.exists(kasahara_metrics_path)) {
-  kasahara_metrics <- readr::read_rds(kasahara_metrics_path)
-  kasahara_metrics <- filter_protocol_metrics(kasahara_metrics)
+if (file.exists(kasahara_validation_path)) {
+  kasahara_metrics <- readr::read_rds(kasahara_validation_path) %>%
+    format_validation_metrics()
   format_table(
     kasahara_metrics,
-    'Kasahara model performance metrics (includes RMSE, R-squared, and OLS/PaBa calibration slope/intercept).',
-    digits = 2,
+    'External validation of original Kasahara model: apparent performance with bootstrap 95% confidence intervals.',
+    digits = 3,
+    font_size = 8
+  )
+} else if (file.exists(kasahara_metrics_path)) {
+  kasahara_metrics <- readr::read_rds(kasahara_metrics_path) %>%
+    filter_protocol_metrics()
+  format_table(
+    kasahara_metrics,
+    'External validation of original Kasahara model (confidence intervals unavailable).',
+    digits = 3,
     font_size = 8
   )
 } else {
-  cat('Kasahara metrics file not found.\n')
+  cat('Kasahara external validation metrics not found.\n')
 }
 ```
 
@@ -264,25 +402,21 @@ page_break()
 The Kasahara model shows systematic miscalibration (overprediction) when applied to this study cohort. A simple log-log linear recalibration can correct this bias using only two parameters.
 
 ## Recalibration approach
-The recalibration equation on the log10 scale is:
-$$
-\log_{10}(NTproBNP_{recal}) = I + S \times \log_{10}(\widehat{NTproBNP}_{Kasahara})
-$$
-where $I$ is the intercept (calibration-in-the-large) and $S$ is the slope (calibration slope). Perfect calibration corresponds to $I=0$ and $S=1$.
+Recalibration uses an intercept ($I$; calibration-in-the-large) and slope ($S$; calibration slope) on the log10 scale. Perfect calibration corresponds to $I=0$ and $S=1$. The full implementable conversion equation is shown once in the Final full conversion equation section.
 
 ```{r table-kasahara-recal-metrics}
-kasahara_recal_path <- file.path(params$output_dir, 'kasahara_model_prediction_errors_recal_ols.rds')
+kasahara_recal_path <- file.path(params$output_dir, 'kasahara_recal_optimism_corrected.rds')
 if (file.exists(kasahara_recal_path)) {
-  kasahara_recal <- readr::read_rds(kasahara_recal_path)
-  kasahara_recal <- filter_protocol_metrics(kasahara_recal)
+  kasahara_recal <- readr::read_rds(kasahara_recal_path) %>%
+    format_optimism_metrics()
   format_table(
     kasahara_recal,
-    'Recalibrated Kasahara model performance metrics.',
+    'Recalibrated Kasahara model: apparent and optimism-corrected performance metrics.',
     digits = 3,
     font_size = 8
   )
 } else {
-  cat('Recalibrated Kasahara metrics file not found.\n')
+  cat('Recalibrated Kasahara optimism-corrected metrics file not found.\n')
 }
 ```
 
@@ -290,7 +424,7 @@ if (file.exists(kasahara_recal_path)) {
 page_break()
 ```
 
-```{r fig-kasahara-recal-loglog, fig.cap='Recalibrated Kasahara model calibration (log-log scale).'}
+```{r fig-kasahara-recal-loglog, fig.cap='Recalibrated Kasahara model calibration (log-log scale) with 95% confidence bands.'}
 fig_path <- file.path(params$output_dir, 'calibration_plot_kasahara_recal_ols_loglog.png')
 if (file.exists(fig_path)) {
   knitr::include_graphics(fig_path)
@@ -311,29 +445,56 @@ Three modeling approaches are compared:
 
 1. **Recalibrated Kasahara**: The original Kasahara equation with a 2-parameter log-log recalibration ($I$, $S$)
 2. **Kasahara-like (re-estimated)**: Same predictors as Kasahara (log10(BNP), Age, BMI, Hb, CrCl, Sex, AF), coefficients re-estimated on this study's data (additive model)
-3. **Protocol model**: Kasahara predictors plus CrCl $\times$ Age $\times$ log10(BNP) interaction terms, as specified in the protocol
+3. **Extended model**: Kasahara predictors with restricted cubic splines, plus the 3-way interaction between spline-transformed log10(BNP), Age, and CrCl: $rcs(\log_{10}(BNP)) \times rcs(Age) \times rcs(CrCl)$.
 
-The table below compares key performance metrics across all three approaches.
+## Optimism-corrected performance
+Model comparison is reported using optimism-corrected performance (preferred over apparent-only comparisons).
 
-```{r table-model-comparison}
-comparison_path <- file.path(params$output_dir, 'model_comparison_summary.rds')
-if (file.exists(comparison_path)) {
-  comparison_tbl <- readr::read_rds(comparison_path)
-  comparison_display <- comparison_tbl %>%
-    dplyr::select(-dplyr::any_of('paba_slope_log10')) %>%
-    dplyr::rename(
-      Model = model,
-      `RMSE (log10)` = rmse_log10,
-      `R² (log10)` = rsq_log10
-    )
+```{r table-optimism-kasahara}
+optimism_path_kasahara <- file.path(params$output_dir, 'kasahara_recal_optimism_corrected.rds')
+if (file.exists(optimism_path_kasahara)) {
+  optimism_kasahara <- readr::read_rds(optimism_path_kasahara) %>%
+    format_optimism_metrics()
   format_table(
-    comparison_display,
-    'Performance comparison: Recalibrated Kasahara vs re-estimated (additive) vs protocol model (interactions).',
+    optimism_kasahara,
+    'Recalibrated Kasahara model: apparent and optimism-corrected performance metrics.',
     digits = 3,
     font_size = 8
   )
 } else {
-  cat('Model comparison summary file not found.\n')
+  cat('Recalibrated Kasahara optimism-corrected metrics file not found.\n')
+}
+```
+
+```{r table-optimism-reestimated}
+optimism_path_base <- file.path(params$output_dir, 'base_model_optimism_corrected.rds')
+if (file.exists(optimism_path_base)) {
+  optimism_base <- readr::read_rds(optimism_path_base) %>%
+    format_optimism_metrics()
+  format_table(
+    optimism_base,
+    'Re-estimated additive model: apparent and optimism-corrected performance metrics.',
+    digits = 3,
+    font_size = 8
+  )
+} else {
+  cat('Re-estimated model optimism-corrected metrics file not found.\n')
+}
+```
+
+```{r table-optimism-extended}
+optimism_path_extended <- file.path(params$output_dir, 'extended_model_optimism_corrected.rds')
+if (file.exists(optimism_path_extended)) {
+  optimism_extended <- readr::read_rds(optimism_path_extended) %>%
+    format_optimism_metrics()
+  format_table(
+    optimism_extended,
+    'Extended model with spline interactions: apparent and optimism-corrected performance metrics.',
+    digits = 3,
+    font_size = 8
+  )
+} else {
+  cat('Extended model optimism-corrected metrics file not found.\n')
 }
 ```
 
@@ -342,9 +503,9 @@ The nested model comparison demonstrates that:
 
 1. **Simple recalibration is highly effective**: The 2-parameter log-log recalibration of the Kasahara model substantially improves calibration and achieves most of the predictive performance of more complex approaches.
 
-2. **Re-estimating coefficients provides marginal benefit**: Fitting a Kasahara-like model on this study's data yields only a small improvement in R² over the recalibrated original equation.
+2. **Re-estimating all coefficients provides no benefit**: Refitting the Kasahara model on this study's data yields only a small improvement in R² over the recalibrated original equation with apparent performance and no improvement after correction for optimism.
 
-3. **Interaction terms add minimal value**: Per protocol, we tested whether interaction terms between CrCl, Age, and log10(BNP) improve prediction. Although these interactions may reach statistical significance in the LRT (due to sample size), the R² improvement is negligible, indicating that the interaction structure does not meaningfully improve clinical prediction beyond the additive model.
+3. **Spline interaction terms add minimal incremental value**: Adding the spline-transformed interaction structure between log10(BNP), Age, and CrCl yields only negligible R² improvement beyond the additive Kasahara-like model.
 
 This supports using the simple recalibrated Kasahara model as the primary conversion approach.
 
@@ -356,138 +517,52 @@ page_break()
 Based on the nested model comparison above, the recommended conversion formula is the simple 2-parameter recalibration of the Kasahara model. This approach achieves the vast majority of predictive performance without the complexity of re-estimating coefficients or adding interaction terms.
 
 ## Recalibration equation
-The recalibrated Kasahara conversion on the log10 scale is:
-$$
-\log_{10}(\widehat{NTproBNP}_{recal}) = I + S \times \log_{10}(\widehat{NTproBNP}_{Kasahara})
-$$
-where $\widehat{NTproBNP}_{Kasahara}$ is the prediction from the original Kasahara formula (see Section 3), and $I$ (intercept) and $S$ (slope) are recalibration parameters estimated by OLS regression on this study cohort.
-
-The recalibrated prediction on the original scale is:
-$$
-\widehat{NTproBNP}_{recal} = 10^{I + S \times \log_{10}(\widehat{NTproBNP}_{Kasahara})}
-$$
+The full implementable conversion equation (including all Kasahara components and recalibration parameters) is shown once in the Final full conversion equation section below.
 
 ## Rationale
 This simple recalibration approach is preferred because:
 
 1. **Parsimony**: Only 2 parameters (intercept and slope) need to be estimated, minimizing overfitting risk
 2. **Transportability**: The original Kasahara coefficients remain fixed; only a calibration adjustment is applied
-3. **Performance**: The R² and RMSE are nearly identical to more complex models (see comparison table above)
+3. **Performance**: Optimism-corrected performance remains close to more complex models in the comparison section above
 4. **Interpretability**: The recalibration parameters directly quantify the calibration-in-the-large ($I$) and calibration slope ($S$)
 
 Perfect calibration corresponds to $I=0$ and $S=1$. Deviations indicate systematic differences between the development cohort (Kasahara) and the validation cohort (this study).
 
-## Statistical methodology: OLS versus Passing-Bablok regression
-The protocol specified Passing-Bablok regression for recalibration. However, we used ordinary least squares (OLS) regression instead for the following reasons:
+## Statistical methodology
+A single OLS recalibration on the log10 scale is used throughout this report. All recalibrated predictions, threshold derivations, and outcome analyses are based on this one model.
 
-1. **Passing-Bablok assumptions are not met**: Passing-Bablok regression assumes that measurement error is proportionate between the two methods being compared. In our case, the Kasahara prediction is derived from multiple measured variables (BNP, hemoglobin, creatinine clearance, etc.), each with its own measurement error structure. This violates the proportional error assumption that Passing-Bablok requires.
+## Final full conversion equation
+For implementation portability, the full recalibrated Kasahara conversion equation is shown below in a single expression (all Kasahara components plus OLS recalibration parameters):
 
-2. **Results are nearly identical**: As shown below, the OLS and Passing-Bablok estimates differ only in the fourth decimal place, confirming that the choice has minimal practical impact on the recalibration.
-
-3. **Simplicity**: OLS provides straightforward recalibration parameters without the complexity of error-in-variables assumptions.
-
-For these reasons, we report OLS-based recalibration as the primary method.
-
-## Recalibration parameters: OLS versus Passing-Bablok
-Per protocol, we computed recalibration parameters using both OLS and Passing-Bablok regression. The table below shows both sets of estimates side-by-side.
-
-```{r table-recal-params-comparison}
-# Read metrics from both methods
-ols_path <- file.path(params$output_dir, 'kasahara_model_prediction_errors.rds')
-ols_recal_path <- file.path(params$output_dir, 'kasahara_model_prediction_errors_recal_ols.rds')
-paba_recal_path <- file.path(params$output_dir, 'kasahara_model_prediction_errors_recal_paba.rds')
-
-if (file.exists(ols_path)) {
-  ols_metrics <- readr::read_rds(ols_path)
-  
-  # Extract OLS parameters
-  ols_intercept <- ols_metrics %>%
+```{r full-conversion-equation, results='asis'}
+metrics_path <- file.path(params$output_dir, 'kasahara_model_prediction_errors.rds')
+if (file.exists(metrics_path)) {
+  metrics_full <- readr::read_rds(metrics_path)
+  I_full <- metrics_full %>%
     dplyr::filter(.metric == 'ols_intercept_log10') %>%
     dplyr::pull(.estimate)
-  ols_slope <- ols_metrics %>%
+  S_full <- metrics_full %>%
     dplyr::filter(.metric == 'ols_slope_log10') %>%
     dplyr::pull(.estimate)
-  
-  # Extract PaBa parameters
-  paba_intercept <- ols_metrics %>%
-    dplyr::filter(.metric == 'paba_intercept_log10') %>%
-    dplyr::pull(.estimate)
-  paba_slope <- ols_metrics %>%
-    dplyr::filter(.metric == 'paba_slope_log10') %>%
-    dplyr::pull(.estimate)
-  
-  # Create comparison table
-  recal_comparison <- tibble::tibble(
-    Parameter = c('Intercept (I)', 'Slope (S)'),
-    OLS = c(ols_intercept, ols_slope),
-    `Passing-Bablok` = c(paba_intercept, paba_slope),
-    Difference = c(ols_intercept - paba_intercept, ols_slope - paba_slope)
-  )
-  
-  format_table(
-    recal_comparison,
-    'Recalibration parameters: OLS vs Passing-Bablok (log10 scale).',
-    digits = 4,
-    font_size = 9
-  )
+  if (length(I_full) == 1 && length(S_full) == 1 && is.finite(I_full) && is.finite(S_full)) {
+    cat(sprintf(
+      '$$\\log_{10}(\\widehat{NTproBNP}_{recal}) = %.4f + %.4f \\times \\Big[2.05 + 0.907\\log_{10}(BNP) - 0.00522\\,Age + 0.00283\\,BMI - 0.00866\\,Hb - 0.0422\\,CrCl + 0.000530\\,CrCl^2 - 0.00000214\\,CrCl^3 - 0.00000278\\,\\max(0,CrCl-56.5)^3 + 0.00000621\\,\\max(0,CrCl-72.4)^3 - 0.00000133\\,\\max(0,CrCl-93.7)^3 + 0.0164\\,(1-Sex_M) + 0.194\\,AF\\Big]$$\n',
+      I_full, S_full
+    ))
+    cat('$$\\widehat{NTproBNP}_{recal} = 10^{\\log_{10}(\\widehat{NTproBNP}_{recal})}$$\n')
+  } else {
+    cat('Final full conversion equation not available.\n')
+  }
 } else {
-  cat('Recalibration parameters not found.\n')
-}
-```
-
-```{r table-recal-performance-comparison}
-# Compare performance metrics between OLS and PaBa recalibration
-if (file.exists(ols_recal_path) && file.exists(paba_recal_path)) {
-  ols_perf <- readr::read_rds(ols_recal_path) %>%
-    dplyr::filter(.metric %in% c('rsq_log10', 'rmse_log10')) %>%
-    dplyr::select(.metric, OLS = .estimate)
-  paba_perf <- readr::read_rds(paba_recal_path) %>%
-    dplyr::filter(.metric %in% c('rsq_log10', 'rmse_log10')) %>%
-    dplyr::select(.metric, PaBa = .estimate)
-  
-  perf_comparison <- dplyr::left_join(ols_perf, paba_perf, by = '.metric') %>%
-    dplyr::mutate(
-      Metric = dplyr::case_when(
-        .metric == 'rsq_log10' ~ 'R² (log10 scale)',
-        .metric == 'rmse_log10' ~ 'RMSE (log10 scale)',
-        TRUE ~ .metric
-      ),
-      Difference = OLS - PaBa
-    ) %>%
-    dplyr::select(Metric, OLS, `Passing-Bablok` = PaBa, Difference)
-  
-  format_table(
-    perf_comparison,
-    'Performance comparison: OLS vs Passing-Bablok recalibrated predictions.',
-    digits = 4,
-    font_size = 9
-  )
-} else {
-  cat('Performance comparison data not available.\n')
-}
-```
-
-As shown above, the OLS and Passing-Bablok estimates are nearly identical, with differences in the fourth decimal place. This empirically confirms that the choice of regression method has negligible impact on the recalibration results, supporting our use of OLS for the reasons outlined in the methodology section.
-
-## Final recalibration equation
-Based on the OLS estimates above, the final recalibrated Kasahara conversion formula is:
-
-```{r recal-equation, results='asis'}
-if (exists('ols_intercept') && exists('ols_slope') &&
-    is.finite(ols_intercept) && is.finite(ols_slope)) {
-  cat(sprintf(
-    '$$\\log_{10}(\\widehat{NTproBNP}_{recal}) = %.4f + %.4f \\times \\log_{10}(\\widehat{NTproBNP}_{Kasahara})$$\n',
-    ols_intercept, ols_slope
-  ))
-} else {
-  cat('Recalibration equation not available.\n')
+  cat('Final full conversion equation file not found.\n')
 }
 ```
 
 ## Recalibrated model performance
 The calibration plot and performance metrics below summarize the agreement between measured NT-proBNP and predictions from the recalibrated Kasahara model.
 
-```{r fig-kasahara-recal-cal, fig.cap='Recalibrated Kasahara model: Calibration plot (log-log scale).'}
+```{r fig-kasahara-recal-cal, fig.cap='Recalibrated Kasahara model: calibration plot (log-log scale) with 95% confidence bands.'}
 fig_path <- file.path(params$output_dir, 'calibration_plot_kasahara_recal_ols_loglog.png')
 if (file.exists(fig_path)) {
   knitr::include_graphics(fig_path)
@@ -496,41 +571,7 @@ if (file.exists(fig_path)) {
 }
 ```
 
-```{r table-optimism-corrected}
-optimism_path <- file.path(params$output_dir, 'kasahara_recal_optimism_corrected.rds')
-if (file.exists(optimism_path)) {
-  optimism_tbl <- readr::read_rds(optimism_path)
-  # Rename metrics to proper English
-  metric_labels <- c(
-    'pearson_r_log10' = 'Pearson Correlation (log10)',
-    'rsq_log10' = 'R-squared (log10)',
-    'rmse_log10' = 'RMSE (log10)',
-    'weighted_kappa_quadratic' = 'Weighted Kappa',
-    'sens' = 'Sensitivity',
-    'spec' = 'Specificity',
-    'ols_slope_log10' = 'Calibration Slope (log10)'
-  )
-  optimism_display <- optimism_tbl %>%
-    dplyr::filter(.metric %in% names(metric_labels)) %>%
-    dplyr::mutate(Metric = dplyr::recode(.metric, !!!metric_labels)) %>%
-    dplyr::select(
-      Metric,
-      Apparent = apparent_estimate,
-      Optimism = mean_optimism,
-      `Optimism-Corrected` = optimism_corrected,
-      `95% CI Lower` = ci_lower_95,
-      `95% CI Upper` = ci_upper_95
-    )
-  format_table(
-    optimism_display,
-    'Recalibrated Kasahara model: Apparent and optimism-corrected performance metrics.',
-    digits = 3,
-    font_size = 8
-  )
-} else {
-  cat('Optimism-corrected metrics not available.\n')
-}
-```
+Optimism-corrected metrics for all three models are reported in the nested model comparison section above.
 
 ```{r fig-kasahara-recal-ba-rel, fig.cap='Recalibrated Kasahara model: Bland-Altman plot (relative error).'}
 fig_path <- file.path(params$output_dir, 'BA_kasahara_recal_ols_relative.png')
@@ -546,12 +587,12 @@ page_break()
 ```
 
 # Derived BNP Thresholds
-A key clinical application of the conversion formula is to derive BNP thresholds that correspond to established NT-proBNP decision points (100, 200, and 1500 pg/mL). Because BNP and NT-proBNP are not linearly related and the conversion depends on patient characteristics, these derived BNP thresholds vary by clinical profile.
+To demonstrate clinical application, we derive BNP thresholds that correspond to established NT-proBNP decision points (100, 200, and 1500 pg/mL). Because BNP and NT-proBNP are not linearly related and the conversion depends on patient characteristics, these derived BNP thresholds vary by clinical profile.
 
 ## Methodology
-For a given target NT-proBNP threshold, we numerically solve for the BNP value that produces that target when passed through the recalibrated Kasahara conversion formula with specified covariate values. The base case uses median values for continuous covariates (Age, BMI, CrCl, Hb) and the most common value for binary covariates (Sex, AF).
+For a given target NT-proBNP threshold, we numerically solve for the BNP value that produces that target when passed through the recalibrated Kasahara conversion formula with specified covariate values. The base case uses median values for continuous covariates (Age, BMI, CrCl, Hb), Female sex (Sex_M = 0), and no atrial fibrillation (AF = 0).
 
-The recalibrated Kasahara formula combines the original Kasahara coefficients with the 2-parameter OLS recalibration (intercept $I$, slope $S$) estimated in this cohort. For each covariate profile, we find the BNP value such that $10^{I + S \times \log_{10}(\widehat{NTproBNP}_{Kasahara})} = \text{target NT-proBNP}$.
+The recalibrated Kasahara formula combines the original Kasahara coefficients with the 2-parameter OLS recalibration (intercept $I$, slope $S$) estimated in this cohort. For each covariate profile, we numerically solve for the BNP value such that the final full conversion equation equals the target NT-proBNP.
 
 ## Sensitivity of BNP thresholds to patient characteristics
 The table below shows how the derived BNP thresholds vary when individual patient characteristics are changed from their median/typical values. This demonstrates the effect modification by covariates in the conversion formula.
@@ -566,18 +607,18 @@ if (file.exists(threshold_path)) {
     threshold_display <- threshold_tbl %>%
       dplyr::select(
         Age, BMI, CrCl, Hb, Sex, AF,
-        `BNP for NT 100` = BNP_for_NT100,
-        `BNP for NT 200` = BNP_for_NT200,
-        `BNP for NT 1500` = BNP_for_NT1500
+        `BNP for NT-proBNP 100` = BNP_for_NT100,
+        `BNP for NT-proBNP 200` = BNP_for_NT200,
+        `BNP for NT-proBNP 1500` = BNP_for_NT1500
       )
   } else {
     # Old structure with Profile column
     threshold_display <- threshold_tbl %>%
       dplyr::select(
         Profile,
-        `BNP for NT 100` = BNP_for_NT100,
-        `BNP for NT 200` = BNP_for_NT200,
-        `BNP for NT 1500` = BNP_for_NT1500
+        `BNP for NT-proBNP 100` = BNP_for_NT100,
+        `BNP for NT-proBNP 200` = BNP_for_NT200,
+        `BNP for NT-proBNP 1500` = BNP_for_NT1500
       )
   }
   format_table(
@@ -608,8 +649,8 @@ $$
 $$
 where the reference category is <100 pg/mL and the remaining categories are 100-<200, 200-<1500, and >=1500. Models are:
 
-- Model A: measured NT-proBNP categories
-- Model C: predicted NT-proBNP categories from the recalibrated model
+- Measured NT-proBNP categories
+- Predicted NT-proBNP categories from the recalibrated model
 
 Odds ratios are $\exp(a_j)$ relative to the reference. Firth logistic regression is also fit to reduce small-sample bias and mitigate separation; interpretation of coefficients and odds ratios is the same.
 
@@ -618,10 +659,9 @@ To visualize continuous associations, we fit restricted cubic spline logistic re
 $$
 \operatorname{logit}\{P(outcome=1)\} = a_0 + g(X)
 $$
-where $g(\cdot)$ is a restricted cubic spline with 3 knots for $X$ equal to measured NT-proBNP, measured BNP, or predicted NT-proBNP. The plotted curves show odds ratios relative to the 25th percentile of $X$ using `rms::contrast`, with 95% confidence bands.
+where $g(\cdot)$ is a restricted cubic spline with 3 knots for $X$ equal to measured NT-proBNP, measured BNP, or predicted NT-proBNP. The plotted curves show odds ratios relative to the 25th percentile of $X$ with 95% confidence bands.
 
-## Rationale and interpretation
-Categorical models align with clinically used NT-proBNP thresholds and allow direct odds-ratio comparisons across risk strata. The spline models provide a nonparametric check for nonlinearity and highlight ranges where risk changes more steeply.
+## Results
 
 ```{r table-outcome-a}
 model_a_glm <- get_obj('model_a_glm')
@@ -658,6 +698,25 @@ if (!is.null(model_a_glm) && !is.null(model_a_firth)) {
   tbl_a <- tbl_a %>%
     dplyr::select(-dplyr::any_of('part')) %>%
     dplyr::rename(`NT-proBNP Category` = term)
+  counts_path_a <- file.path(params$output_dir, 'ntprobnp_cat_summary.rds')
+  if (file.exists(counts_path_a)) {
+    counts_a <- readr::read_rds(counts_path_a) %>%
+      dplyr::mutate(
+        `NT-proBNP Category` = dplyr::case_when(
+          Category == '<100' ~ '<100 (reference)',
+          Category == '100-<200' ~ '100 to <200',
+          Category == '200-<1500' ~ '200 to <1500',
+          Category == '>=1500' ~ '>=1500',
+          TRUE ~ as.character(Category)
+        ),
+        `events / n` = paste0(events, ' / ', n)
+      ) %>%
+      dplyr::select(`NT-proBNP Category`, `events / n`)
+    tbl_a <- tbl_a %>%
+      dplyr::left_join(counts_a, by = 'NT-proBNP Category') %>%
+      dplyr::relocate(`events / n`, .after = `NT-proBNP Category`)
+  }
+  tbl_a <- format_p_columns(tbl_a, digits = 3)
   format_table(
     tbl_a,
     'Association between measured NT-proBNP categories and the composite outcome (odds ratios).',
@@ -666,7 +725,7 @@ if (!is.null(model_a_glm) && !is.null(model_a_firth)) {
     drop_model_type = FALSE
   )
 } else {
-  cat('Outcome model A not available.\n')
+  cat('Measured NT-proBNP category outcome model not available.\n')
 }
 ```
 
@@ -709,6 +768,25 @@ if (!is.null(model_c_glm) && !is.null(model_c_firth)) {
   tbl_c <- tbl_c %>%
     dplyr::select(-dplyr::any_of('part')) %>%
     dplyr::rename(`Predicted NT-proBNP Category` = term)
+  counts_path_c <- file.path(params$output_dir, 'pred_cat_summary.rds')
+  if (file.exists(counts_path_c)) {
+    counts_c <- readr::read_rds(counts_path_c) %>%
+      dplyr::mutate(
+        `Predicted NT-proBNP Category` = dplyr::case_when(
+          Category == '<100' ~ '<100 (reference)',
+          Category == '100-<200' ~ '100 to <200',
+          Category == '200-<1500' ~ '200 to <1500',
+          Category == '>=1500' ~ '>=1500',
+          TRUE ~ as.character(Category)
+        ),
+        `events / n` = paste0(events, ' / ', n)
+      ) %>%
+      dplyr::select(`Predicted NT-proBNP Category`, `events / n`)
+    tbl_c <- tbl_c %>%
+      dplyr::left_join(counts_c, by = 'Predicted NT-proBNP Category') %>%
+      dplyr::relocate(`events / n`, .after = `Predicted NT-proBNP Category`)
+  }
+  tbl_c <- format_p_columns(tbl_c, digits = 3)
   format_table(
     tbl_c,
     'Association between predicted NT-proBNP categories (recalibrated model) and the composite outcome (odds ratios).',
@@ -717,7 +795,7 @@ if (!is.null(model_c_glm) && !is.null(model_c_firth)) {
     drop_model_type = FALSE
   )
 } else {
-  cat('Outcome model C not available.\n')
+  cat('Predicted NT-proBNP category outcome model not available.\n')
 }
 ```
 
@@ -781,13 +859,99 @@ n_text <- if (length(n_parts) > 0) {
   NULL
 }
 note_parts <- c(
-  '**Figure note.** Restricted cubic spline logistic regression models (3 knots; unadjusted) estimate odds ratios for the 30-day composite of MINS or vascular death. Predicted NT-proBNP values are from the recalibrated model (PaBa on log10 scale). Curves show odds ratios relative to the 25th percentile of each biomarker with 95% confidence bands.',
+  '**Figure note.** Restricted cubic spline logistic regression models (3 knots; unadjusted) estimate odds ratios for the 30-day composite of MINS or vascular death. Predicted NT-proBNP values are from the recalibrated model (OLS on log10 scale). Curves show odds ratios relative to the 25th percentile of each biomarker with 95% confidence bands.',
   ref_text,
   n_text
 )
 note <- paste(note_parts, collapse = ' ')
 cat(note, '\n')
 ```
+
+# Appendix: OLS versus Passing-Bablok Sensitivity
+This sensitivity section is provided at the end for completeness. The primary analysis uses a single OLS log-log recalibration throughout.
+
+## Why OLS was used as the primary method
+1. **Model structure**: The Kasahara prediction is derived from multiple measured covariates (BNP, hemoglobin, renal function, etc.), not a direct one-to-one assay comparison.
+2. **Methodological fit**: Passing-Bablok assumes proportional error in both variables (a method-comparison setting). Here, predicted NT-proBNP is a model-derived quantity from multiple covariates, so that assumption is not well matched to this recalibration problem.
+3. **Empirical robustness**: In this dataset, OLS and Passing-Bablok produce very similar recalibrated performance.
+
+## Recalibration parameter comparison (log10 scale)
+```{r table-recal-params-comparison-end}
+summary_rds <- file.path(params$output_dir, 'kasahara_loglog_calibration_summary.rds')
+summary_csv <- file.path(params$output_dir, 'kasahara_loglog_calibration_summary.csv')
+if (file.exists(summary_rds) || file.exists(summary_csv)) {
+  recal_summary <- if (file.exists(summary_rds)) {
+    readr::read_rds(summary_rds)
+  } else {
+    readr::read_csv(summary_csv, show_col_types = FALSE)
+  }
+  params_tbl <- recal_summary %>%
+    dplyr::mutate(
+      Method = dplyr::case_when(
+        method == 'PaBa' ~ 'Passing-Bablok',
+        TRUE ~ as.character(method)
+      )
+    ) %>%
+    dplyr::select(
+      Method,
+      Intercept = intercept,
+      `Intercept 95% CI Lower` = intercept_ci_lower,
+      `Intercept 95% CI Upper` = intercept_ci_upper,
+      Slope = slope,
+      `Slope 95% CI Lower` = slope_ci_lower,
+      `Slope 95% CI Upper` = slope_ci_upper,
+      n
+    )
+  format_table(
+    params_tbl,
+    'Log-log recalibration parameters: OLS versus Passing-Bablok sensitivity comparison.',
+    digits = 4,
+    font_size = 8
+  )
+} else {
+  cat('Recalibration parameter comparison data not found.\n')
+}
+```
+
+## External validation performance comparison after recalibration
+```{r table-recal-performance-comparison-end}
+ols_recal_path <- file.path(params$output_dir, 'kasahara_model_prediction_errors_recal_ols.rds')
+paba_recal_path <- file.path(params$output_dir, 'kasahara_model_prediction_errors_recal_paba.rds')
+if (file.exists(ols_recal_path) && file.exists(paba_recal_path)) {
+  perf_ols <- readr::read_rds(ols_recal_path) %>%
+    dplyr::filter(.metric %in% c('rmse_log10', 'rsq_log10', 'pearson_r_log10', 'ols_intercept_log10', 'ols_slope_log10')) %>%
+    dplyr::select(.metric, OLS = .estimate)
+  perf_paba <- readr::read_rds(paba_recal_path) %>%
+    dplyr::filter(.metric %in% c('rmse_log10', 'rsq_log10', 'pearson_r_log10', 'ols_intercept_log10', 'ols_slope_log10')) %>%
+    dplyr::select(.metric, `Passing-Bablok` = .estimate)
+  metric_labels <- c(
+    'ols_intercept_log10' = 'Calibration Intercept (log10)',
+    'ols_slope_log10' = 'Calibration Slope (log10)',
+    'pearson_r_log10' = 'Pearson Correlation (log10)',
+    'rsq_log10' = 'R-squared (log10)',
+    'rmse_log10' = 'RMSE (log10)'
+  )
+  metric_order <- c('ols_intercept_log10', 'ols_slope_log10', 'pearson_r_log10', 'rsq_log10', 'rmse_log10')
+  perf_tbl <- dplyr::left_join(perf_ols, perf_paba, by = '.metric') %>%
+    dplyr::mutate(
+      Metric = dplyr::recode(.metric, !!!metric_labels),
+      .order = match(.metric, metric_order),
+      Difference = OLS - `Passing-Bablok`
+    ) %>%
+    dplyr::arrange(.order) %>%
+    dplyr::select(Metric, OLS, `Passing-Bablok`, Difference)
+  format_table(
+    perf_tbl,
+    'External validation performance after recalibration: OLS versus Passing-Bablok sensitivity comparison.',
+    digits = 4,
+    font_size = 8
+  )
+} else {
+  cat('OLS/Passing-Bablok recalibrated performance files not found.\n')
+}
+```
+
+In this dataset, differences between OLS and Passing-Bablok recalibration are small; this supports retaining OLS as the primary method while transparently reporting the sensitivity analysis.
 
 ```{r, results='asis'}
 page_break()

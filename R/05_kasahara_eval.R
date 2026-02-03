@@ -28,7 +28,8 @@ if (n_eval_kasahara > 10) {
   old_model_errors <- compute_metrics(
     data_eval_kasahara, # Use the correctly filtered data
     target_col = "NTproBNP",
-    predicted_col = "pred_ntprobnp_kasahara"
+    predicted_col = "pred_ntprobnp_kasahara",
+    include_paba = FALSE
   )
 
   # Save results
@@ -45,15 +46,83 @@ if (n_eval_kasahara > 10) {
   print("Kasahara (Old) model performance metrics (from compute_metrics):")
   print(old_model_errors)
 
-  # Assign the result from the compute_metrics PaBa attempt for plotting
-  # (This uses the run_mcreg helper with tryCatch)
-  paba_old_model_obj <- run_mcreg(
-    data_eval_kasahara,
-    x_col = pred_ntprobnp_kasahara,
-    y_col = NTproBNP
-  )
+  # --- Bootstrap 95% CIs for external validation metrics (original Kasahara) ---
+  print(glue(
+    "--- Bootstrapping 95% CIs for external validation metrics ({CONFIG$bootstrap_reps} iterations) ---"
+  ))
 
-  # --- Log-Log Calibration (Kasahara): OLS + Passing-Bablok ---
+  calculate_validation_metrics_step <- function(split) {
+    bs_data <- rsample::analysis(split) %>%
+      filter(
+        is.finite(NTproBNP) &
+          is.finite(pred_ntprobnp_kasahara) &
+          NTproBNP > 0 &
+          pred_ntprobnp_kasahara > 0
+      )
+    if (nrow(bs_data) < 20) {
+      return(NULL)
+    }
+    compute_metrics(
+      bs_data,
+      target_col = "NTproBNP",
+      predicted_col = "pred_ntprobnp_kasahara",
+      include_paba = FALSE
+    ) %>%
+      select(.metric, .estimator, .estimate)
+  }
+
+  boots_validation_kasahara <- rsample::bootstraps(
+    data_eval_kasahara,
+    times = CONFIG$bootstrap_reps,
+    apparent = FALSE
+  )
+  validation_cores <- get_bootstrap_cores()
+  message(glue(
+    "Running external validation CI bootstrap on {validation_cores} core(s)..."
+  ))
+  validation_boot_list <- parallel::mclapply(
+    boots_validation_kasahara$splits,
+    function(split) {
+      calculate_validation_metrics_step(split)
+    },
+    mc.cores = validation_cores,
+    mc.set.seed = TRUE
+  )
+  validation_boot <- bind_rows(purrr::keep(validation_boot_list, ~ !is.null(.)))
+
+  if (nrow(validation_boot) > 10) {
+    validation_ci <- validation_boot %>%
+      group_by(.metric, .estimator) %>%
+      summarise(
+        ci_lower_95 = quantile(.estimate, probs = 0.025, na.rm = TRUE),
+        ci_upper_95 = quantile(.estimate, probs = 0.975, na.rm = TRUE),
+        n_boots = n(),
+        .groups = "drop"
+      )
+
+    kasahara_validation_metrics_with_ci <- old_model_errors %>%
+      rename(estimate = .estimate) %>%
+      left_join(validation_ci, by = c(".metric", ".estimator")) %>%
+      arrange(.metric, .estimator)
+
+    print("Kasahara external validation metrics with 95% bootstrap CIs:")
+    print(kasahara_validation_metrics_with_ci)
+
+    write_rds(
+      kasahara_validation_metrics_with_ci,
+      output_path("kasahara_validation_metrics_with_ci.rds")
+    )
+    if (isTRUE(CONFIG$write_csv_outputs)) {
+      write_csv(
+        kasahara_validation_metrics_with_ci,
+        output_path("kasahara_validation_metrics_with_ci.csv")
+      )
+    }
+  } else {
+    print("Insufficient bootstrap results for external validation CI estimation.")
+  }
+
+  # --- Log-Log Calibration (Kasahara): OLS primary, PaBa sensitivity ---
   # Recalibration equation (log10 scale):
   # log10(NTproBNP) = I + S*log10(pred_kasahara)
   # pred_kasahara_recal = 10^(I + S*log10(pred_kasahara))
@@ -73,8 +142,19 @@ if (n_eval_kasahara > 10) {
     )
     kasahara_loglog_intercept_ols <- coef(loglog_fit)[1]
     kasahara_loglog_slope_ols <- coef(loglog_fit)[2]
+    loglog_ci <- tryCatch(confint(loglog_fit), error = function(e) NULL)
+    intercept_ci <- if (!is.null(loglog_ci)) {
+      loglog_ci["(Intercept)", ]
+    } else {
+      c(NA_real_, NA_real_)
+    }
+    slope_ci <- if (!is.null(loglog_ci)) {
+      loglog_ci["log10(pred_ntprobnp_kasahara)", ]
+    } else {
+      c(NA_real_, NA_real_)
+    }
 
-    # Passing-Bablok log-log calibration: log10(Actual) vs log10(Predicted)
+    # Passing-Bablok sensitivity fit (reported in a terminal comparison section)
     paba_loglog_kasahara <- tryCatch(
       {
         mcreg(
@@ -88,12 +168,20 @@ if (n_eval_kasahara > 10) {
     )
     kasahara_loglog_intercept_paba <- NA_real_
     kasahara_loglog_slope_paba <- NA_real_
+    paba_intercept_ci <- c(NA_real_, NA_real_)
+    paba_slope_ci <- c(NA_real_, NA_real_)
     if (!is.null(paba_loglog_kasahara) && is_mcr_result(paba_loglog_kasahara)) {
-      kasahara_loglog_intercept_paba <- paba_loglog_kasahara@para[
-        "Intercept",
-        "EST"
-      ]
-      kasahara_loglog_slope_paba <- paba_loglog_kasahara@para["Slope", "EST"]
+      paba_para <- paba_loglog_kasahara@para
+      kasahara_loglog_intercept_paba <- paba_para["Intercept", "EST"]
+      kasahara_loglog_slope_paba <- paba_para["Slope", "EST"]
+      paba_intercept_ci <- c(
+        paba_para["Intercept", "LCI"],
+        paba_para["Intercept", "UCI"]
+      )
+      paba_slope_ci <- c(
+        paba_para["Slope", "LCI"],
+        paba_para["Slope", "UCI"]
+      )
     }
 
     kasahara_loglog_summary <- tibble(
@@ -102,8 +190,16 @@ if (n_eval_kasahara > 10) {
         kasahara_loglog_intercept_ols,
         kasahara_loglog_intercept_paba
       ),
+      intercept_ci_lower = c(intercept_ci[1], paba_intercept_ci[1]),
+      intercept_ci_upper = c(intercept_ci[2], paba_intercept_ci[2]),
       slope = c(kasahara_loglog_slope_ols, kasahara_loglog_slope_paba),
+      slope_ci_lower = c(slope_ci[1], paba_slope_ci[1]),
+      slope_ci_upper = c(slope_ci[2], paba_slope_ci[2]),
       n = nrow(loglog_data)
+    )
+    write_rds(
+      kasahara_loglog_summary,
+      output_path("kasahara_loglog_calibration_summary.rds")
     )
     if (isTRUE(CONFIG$write_csv_outputs)) {
       write_csv(
@@ -111,10 +207,10 @@ if (n_eval_kasahara > 10) {
         output_path("kasahara_loglog_calibration_summary.csv")
       )
     }
-    print("Kasahara log-log calibration coefficients (OLS and PaBa):")
+    print("Kasahara log-log recalibration coefficients (primary OLS; PaBa sensitivity):")
     print(kasahara_loglog_summary)
 
-    # Add recalibrated predictions to datasets (OLS and PaBa)
+    # Add recalibrated predictions to datasets (OLS primary, PaBa sensitivity)
     analysis_data_raw <- analysis_data_raw %>%
       mutate(
         pred_ntprobnp_kasahara_recal_ols = ifelse(
@@ -152,7 +248,7 @@ if (n_eval_kasahara > 10) {
         )
       )
 
-    # Evaluate recalibrated Kasahara predictions (OLS and PaBa)
+    # Evaluate recalibrated Kasahara predictions (OLS)
     old_model_errors_recal_ols <- compute_metrics(
       data_eval_kasahara,
       target_col = "NTproBNP",
@@ -170,6 +266,36 @@ if (n_eval_kasahara > 10) {
     }
     print("Kasahara (Recalibrated OLS) model performance metrics:")
     print(old_model_errors_recal_ols)
+
+    # Evaluate PaBa-recalibrated predictions for end-of-report sensitivity comparison
+    paba_eval_data <- data_eval_kasahara %>%
+      filter(
+        is.finite(NTproBNP) &
+          is.finite(pred_ntprobnp_kasahara_recal_paba) &
+          NTproBNP > 0 &
+          pred_ntprobnp_kasahara_recal_paba > 0
+      )
+    if (nrow(paba_eval_data) >= 10) {
+      old_model_errors_recal_paba <- compute_metrics(
+        paba_eval_data,
+        target_col = "NTproBNP",
+        predicted_col = "pred_ntprobnp_kasahara_recal_paba"
+      )
+      write_rds(
+        old_model_errors_recal_paba,
+        output_path("kasahara_model_prediction_errors_recal_paba.rds")
+      )
+      if (isTRUE(CONFIG$write_csv_outputs)) {
+        write_csv(
+          old_model_errors_recal_paba,
+          output_path("kasahara_model_prediction_errors_recal_paba.csv")
+        )
+      }
+      print("Kasahara (Recalibrated PaBa sensitivity) model performance metrics:")
+      print(old_model_errors_recal_paba)
+    } else {
+      warning("Insufficient valid data for PaBa recalibration sensitivity metrics.")
+    }
 
     # --- Optimism Correction for Recalibrated Kasahara (Frank Harrell's method) ---
     # 1. Apparent performance on full sample (already computed above)
@@ -340,20 +466,6 @@ if (n_eval_kasahara > 10) {
     # Store recalibration parameters for use elsewhere
     kasahara_recal_params <- c(kasahara_loglog_intercept_ols, kasahara_loglog_slope_ols)
 
-    if (
-      is.finite(kasahara_loglog_intercept_paba) &&
-        is.finite(kasahara_loglog_slope_paba)
-    ) {
-      old_model_errors_recal_paba <- compute_metrics(
-        data_eval_kasahara,
-        target_col = "NTproBNP",
-        predicted_col = "pred_ntprobnp_kasahara_recal_paba"
-      )
-      print("Kasahara (Recalibrated PaBa) model performance metrics:")
-      print(old_model_errors_recal_paba)
-    } else {
-      print("Kasahara PaBa log-log recalibration failed or insufficient data.")
-    }
   } else {
     print("Insufficient data for log-log calibration of Kasahara model.")
   }
@@ -362,7 +474,6 @@ if (n_eval_kasahara > 10) {
     "Insufficient data to evaluate Kasahara model performance via compute_metrics."
   )
   old_model_errors <- NULL # Ensure it's defined for later checks
-  paba_old_model_obj <- NULL
 }
 
 print("--- Finished Section 2 ---")

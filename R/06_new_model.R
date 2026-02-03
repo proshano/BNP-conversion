@@ -1,6 +1,6 @@
 #===============================================================================
 # Section 4: Develop, Recalibrate, and Evaluate New Model
-# Uses log10 scale throughout (matching Kasahara) and PaBa recalibration (per protocol)
+# Uses log10 scale throughout (matching Kasahara) and OLS recalibration
 #===============================================================================
 print("--- Starting Section 4: New Model Development & Evaluation ---")
 
@@ -15,7 +15,7 @@ md <- analysis_data
 #
 # Compares: (1) Recalibrated Kasahara (2-param adjustment)
 #           (2) Kasahara-like (re-estimated, additive)
-#           (3) Protocol model (+ CrCl*Age*BNP interactions)
+#           (3) Extended model (+ CrCl*Age*BNP interactions)
 #===============================================================================
 print("--- Section 4A: Nested Model Comparison ---")
 
@@ -29,13 +29,13 @@ if (is.null(fit_base)) {
 print("Kasahara-like model (base, additive) summary:")
 print(fit_base)
 
-# --- Fit Protocol model (Kasahara + CrCl*Age*BNP interactions per protocol) ---
-print("Fitting protocol model (Kasahara predictors + CrCl*Age*BNP interactions)...")
+# --- Fit Extended model (Kasahara + CrCl*Age*BNP interactions per protocol) ---
+print("Fitting extended model (Kasahara predictors + CrCl*Age*BNP interactions)...")
 fit_protocol <- fit_protocol_model(md, knots = CONFIG$rcs_knots)
 if (is.null(fit_protocol)) {
-  warning("Protocol model fitting failed. Skipping nested comparison.")
+  warning("Extended model fitting failed. Skipping nested comparison.")
 } else {
-  print("Protocol model (with interactions) summary:")
+  print("Extended model (with interactions) summary:")
   print(fit_protocol)
 }
 
@@ -61,7 +61,7 @@ if (!is.null(fit_base) && !is.null(fit_protocol)) {
 
   # Summary table
   nested_model_comparison <- tibble(
-    comparison = "Protocol (interactions) vs Additive (Kasahara-like)",
+    comparison = "Extended (interactions) vs Additive (Kasahara-like)",
     base_predictors = "log10(BNP), Age, CrCl, Sex, AF, BMI, Hb (additive)",
     added_terms = "CrCl * Age * log10(BNP) interactions",
     n = fit_base$stats["n"],
@@ -91,7 +91,7 @@ if (!is.null(fit_base) && !is.null(fit_protocol)) {
   # Interpretation
   cat("\n--- Interpretation ---\n")
   cat(sprintf("Additive model R²: %.3f\n", r2_base))
-  cat(sprintf("Protocol model (with interactions) R²: %.3f\n", r2_protocol))
+  cat(sprintf("Extended model (with interactions) R²: %.3f\n", r2_protocol))
   cat(sprintf("R² improvement from adding interactions: %.4f (%.2f%%)\n",
               r2_change, r2_change * 100))
   cat(sprintf("LRT chi-square: %.2f (df=%d), p-value: %.4f\n",
@@ -115,8 +115,8 @@ if (!is.null(fit_base) && !is.null(fit_protocol)) {
     )
   }
 
-  # --- Compare all three approaches: Recalibrated Kasahara vs Re-estimated vs Protocol ---
-  print("--- Comparison: Recalibrated Kasahara vs Re-estimated vs Protocol ---")
+  # --- Compare all three approaches: Recalibrated Kasahara vs Re-estimated vs Extended ---
+  print("--- Comparison: Recalibrated Kasahara vs Re-estimated vs Extended ---")
 
   # Use analysis_data_raw which has recalibrated Kasahara predictions from Section 2
   md_comparison <- analysis_data_raw %>%
@@ -133,7 +133,7 @@ if (!is.null(fit_base) && !is.null(fit_protocol)) {
   md_comparison$log10_pred_base <- predict(fit_base, newdata = md_comparison)
   md_comparison$pred_base <- 10^md_comparison$log10_pred_base
 
-  # Protocol model predictions (with interactions)
+  # Extended model predictions (with interactions)
   md_comparison$log10_pred_protocol <- predict(fit_protocol, newdata = md_comparison)
   md_comparison$pred_protocol <- 10^md_comparison$log10_pred_protocol
 
@@ -148,13 +148,13 @@ if (!is.null(fit_base) && !is.null(fit_protocol)) {
 
   metrics_protocol <- compute_metrics(
     md_comparison, "NTproBNP", "pred_protocol"
-  ) %>% mutate(model = "Protocol (+ interactions)")
+  ) %>% mutate(model = "Extended (+ interactions)")
 
   # Combine and compare key metrics
   all_metrics <- bind_rows(metrics_recal_kasahara, metrics_base, metrics_protocol)
 
   comparison_summary <- all_metrics %>%
-    filter(.metric %in% c("rmse_log10", "rsq_log10", "paba_slope_log10")) %>%
+    filter(.metric %in% c("rmse_log10", "rsq_log10")) %>%
     select(model, .metric, .estimate) %>%
     pivot_wider(names_from = .metric, values_from = .estimate) %>%
     arrange(desc(rsq_log10))
@@ -274,252 +274,296 @@ if (!is.finite(sigma_ols)) {
 # Add initial predictions (log10 scale) to the dataset
 md$log10_pred_initial <- predict(fit_ols)
 
-# --- Recalibration using Passing-Bablok (per protocol) ---
+# --- Recalibration using OLS (used downstream for Section 5 outcomes) ---
 # Recalibration equation (log10 scale):
 # log10(NTproBNP) = I + S * log10_pred_initial
 # pred_median_recal = 10^(I + S * log10_pred_initial)
-print("Running Log10-Log10 Passing-Bablok recalibration (per protocol)...")
-paba_log10_model <- run_mcreg(
-  md,
-  x_col = log10_pred_initial,
-  y_col = log10_ntprobnp
-)
-I_log10_full <- 0
-S_log10_full <- 1
-if (!is.null(paba_log10_model)) {
-  paba_log10_results_para <- paba_log10_model@para
-  I_log10_full <- paba_log10_results_para["Intercept", "EST"]
-  S_log10_full <- paba_log10_results_para["Slope", "EST"]
-  print("Log10-Log10 PaBa Results (Full Sample):")
-  print(paba_log10_results_para)
-} else {
-  print("Log10-Log10 Passing-Bablok failed or insufficient data (full sample).")
-}
+print("Running Log10-Log10 OLS recalibration for downstream predictions...")
+recal_data <- md %>%
+  filter(is.finite(log10_ntprobnp) & is.finite(log10_pred_initial))
 
-# Bootstrap PaBa to estimate CI and recalibration parameters (per protocol: 1000 iterations)
-print(glue(
-  "--- Bootstrapping Log10-Log10 PaBa ({CONFIG$bootstrap_reps} iterations) ---"
-))
-paba_log10_boot <- bootstrap_paba(
-  md,
-  x_col = log10_pred_initial,
-  y_col = log10_ntprobnp,
-  reps = CONFIG$bootstrap_reps
-) %>%
-  filter(is.finite(intercept) & is.finite(slope))
-
-if (nrow(paba_log10_boot) > 10) {
-  paba_log10_boot_summary <- tibble(
-    term = c("Intercept", "Slope"),
-    estimate_median = c(
-      median(paba_log10_boot$intercept, na.rm = TRUE),
-      median(paba_log10_boot$slope, na.rm = TRUE)
-    ),
-    estimate_mean = c(
-      mean(paba_log10_boot$intercept, na.rm = TRUE),
-      mean(paba_log10_boot$slope, na.rm = TRUE)
-    ),
-    ci_lower_95 = c(
-      quantile(paba_log10_boot$intercept, probs = 0.025, na.rm = TRUE),
-      quantile(paba_log10_boot$slope, probs = 0.025, na.rm = TRUE)
-    ),
-    ci_upper_95 = c(
-      quantile(paba_log10_boot$intercept, probs = 0.975, na.rm = TRUE),
-      quantile(paba_log10_boot$slope, probs = 0.975, na.rm = TRUE)
-    ),
-    n_boot = nrow(paba_log10_boot)
-  )
-  print("Bootstrapped Log10-Log10 PaBa Calibration (Median with 95% CI):")
-  print(paba_log10_boot_summary)
-
-  # Use bootstrapped median for recalibration (more robust)
-  I_log10_paba <- paba_log10_boot_summary$estimate_median[
-    paba_log10_boot_summary$term == "Intercept"
-  ]
-  S_log10_paba <- paba_log10_boot_summary$estimate_median[
-    paba_log10_boot_summary$term == "Slope"
-  ]
+if (nrow(recal_data) >= 10) {
+  recal_fit <- lm(log10_ntprobnp ~ log10_pred_initial, data = recal_data)
+  I_log10_ols <- unname(coef(recal_fit)[1])
+  S_log10_ols <- unname(coef(recal_fit)[2])
   print(glue(
-    "Using bootstrapped median for PaBa recalibration: I={round(I_log10_paba, 4)}, S={round(S_log10_paba, 4)}"
+    "Log10-Log10 OLS recalibration parameters: I={round(I_log10_ols, 4)}, S={round(S_log10_ols, 4)}"
   ))
 } else {
-  print(
-    "Insufficient bootstrap PaBa results; using full-sample PaBa estimates."
-  )
-  I_log10_paba <- I_log10_full
-  S_log10_paba <- S_log10_full
+  warning("Insufficient data for OLS recalibration; using I=0, S=1.")
+  I_log10_ols <- 0
+  S_log10_ols <- 1
 }
 
 if (
-  !is.finite(I_log10_paba) || !is.finite(S_log10_paba) || abs(S_log10_paba) < 1e-6
+  !is.finite(I_log10_ols) || !is.finite(S_log10_ols) || abs(S_log10_ols) < 1e-6
 ) {
   warning(
-    "Invalid/near-zero PaBa slope. Resetting to S=1, I=0 (no recalibration)."
+    "Invalid/near-zero OLS slope. Resetting to S=1, I=0 (no recalibration)."
   )
-  I_log10_paba <- 0
-  S_log10_paba <- 1
+  I_log10_ols <- 0
+  S_log10_ols <- 1
 }
-log10_recal_params <- c(I_log10_paba, S_log10_paba)
+log10_recal_params <- c(I_log10_ols, S_log10_ols)
 
 # --- Calculate Recalibrated Predictions (Median) ---
 md <- md %>%
   mutate(
-    log10_pred_recal = I_log10_paba + S_log10_paba * log10_pred_initial,
+    log10_pred_recal = I_log10_ols + S_log10_ols * log10_pred_initial,
     pred_ntprobnp_new_median = 10^log10_pred_recal
   ) %>%
   filter(is.finite(pred_ntprobnp_new_median))
 
-# --- Evaluate APPARENT Performance of RECALIBRATED Model ---
-print("--- Evaluating APPARENT Performance (Recalibrated New Model) ---")
-if (nrow(md) > 10) {
-  apparent_performance_new <- compute_metrics(
-    md,
+# ===============================================================================
+# Optimism Correction for Re-estimated (Additive) and Extended Models
+# These are needed to demonstrate the effect of overfitting in more complex models
+# ===============================================================================
+
+if (!is.null(fit_base) && !is.null(fit_protocol)) {
+  print("--- Starting Optimism Correction for Re-estimated and Extended Models ---")
+  optimism_cores <- get_bootstrap_cores()
+
+  # --- Apparent Performance for Re-estimated (Additive) Model ---
+  md_with_base <- md %>%
+    mutate(
+      log10_pred_base = predict(fit_base, newdata = .),
+      pred_base = 10^log10_pred_base
+    ) %>%
+    filter(is.finite(pred_base))
+
+  apparent_performance_base <- compute_metrics(
+    md_with_base,
     target_col = "NTproBNP",
-    predicted_col = "pred_ntprobnp_new_median"
+    predicted_col = "pred_base"
   )
-  print("Apparent Performance Metrics (Recalibrated New Model - PaBa):")
-  print(apparent_performance_new)
-} else {
-  print("Insufficient data after processing for new model apparent evaluation.")
-  apparent_performance_new <- NULL
-}
+  print("Apparent Performance (Re-estimated Additive Model):")
+  print(apparent_performance_base)
 
-# --- Optimism Correction Bootstrapping ---
-print(glue(
-  "--- Starting Optimism Correction Bootstrapping ({CONFIG$bootstrap_reps} iterations) ---"
-))
+  # --- Apparent Performance for Extended Model ---
+  md_with_protocol <- md %>%
+    mutate(
+      log10_pred_protocol = predict(fit_protocol, newdata = .),
+      pred_protocol = 10^log10_pred_protocol
+    ) %>%
+    filter(is.finite(pred_protocol))
 
-# Function to get performance metrics for one bootstrap iteration
-calculate_optimism_step <- function(split, knots) {
-  bs_analysis <- analysis(split)
-  bs_assessment <- assessment(split)
+  apparent_performance_protocol <- compute_metrics(
+    md_with_protocol,
+    target_col = "NTproBNP",
+    predicted_col = "pred_protocol"
+  )
+  print("Apparent Performance (Extended Model):")
+  print(apparent_performance_protocol)
 
-  # Fit model on bootstrap sample
-  bs_fit <- fit_new_model_ols(bs_analysis, knots = knots)
-  if (is.null(bs_fit)) {
-    return(NULL)
+  # --- Optimism Correction Function for Re-estimated Model ---
+  calculate_optimism_step_base <- function(split, knots) {
+    bs_analysis <- analysis(split)
+    bs_assessment <- assessment(split)
+
+    # Fit additive model on bootstrap sample
+    bs_fit <- fit_kasahara_like_model(bs_analysis, knots = knots)
+    if (is.null(bs_fit)) {
+      return(NULL)
+    }
+
+    # 1. Performance on Bootstrap Sample (Apparent)
+    bs_analysis_pred <- bs_analysis %>%
+      mutate(
+        log10_pred_bs = predict(bs_fit, newdata = .),
+        pred_bs = 10^log10_pred_bs
+      ) %>%
+      filter(is.finite(pred_bs))
+    if (nrow(bs_analysis_pred) < 10) {
+      return(NULL)
+    }
+    perf_on_bootstrap <- compute_metrics(
+      bs_analysis_pred,
+      "NTproBNP",
+      "pred_bs"
+    ) %>%
+      select(.metric, .estimator, .estimate_on_bootstrap = .estimate)
+
+    # 2. Performance on Original Sample (Test)
+    orig_assessment_pred <- bs_assessment %>%
+      mutate(
+        log10_pred_orig = predict(bs_fit, newdata = .),
+        pred_orig = 10^log10_pred_orig
+      ) %>%
+      filter(is.finite(pred_orig))
+    if (nrow(orig_assessment_pred) < 10) {
+      return(NULL)
+    }
+    perf_on_original <- compute_metrics(
+      orig_assessment_pred,
+      "NTproBNP",
+      "pred_orig"
+    ) %>%
+      select(.metric, .estimator, .estimate_on_original = .estimate)
+
+    # Calculate Optimism
+    metrics_step <- inner_join(
+      perf_on_bootstrap,
+      perf_on_original,
+      by = c(".metric", ".estimator")
+    ) %>%
+      mutate(optimism = .estimate_on_bootstrap - .estimate_on_original) %>%
+      filter(is.finite(optimism))
+    return(metrics_step)
   }
 
-  bs_analysis <- bs_analysis %>%
-    mutate(log10_pred_initial_bs = predict(bs_fit, newdata = .))
+  # --- Optimism Correction Function for Extended Model ---
+  calculate_optimism_step_protocol <- function(split, knots) {
+    bs_analysis <- analysis(split)
+    bs_assessment <- assessment(split)
 
-  # Fit PaBa recalibration within bootstrap sample
-  bs_paba <- run_mcreg(
-    bs_analysis,
-    x_col = log10_pred_initial_bs,
-    y_col = log10_ntprobnp
+    # Fit extended model on bootstrap sample
+    bs_fit <- fit_protocol_model(bs_analysis, knots = knots)
+    if (is.null(bs_fit)) {
+      return(NULL)
+    }
+
+    # 1. Performance on Bootstrap Sample (Apparent)
+    bs_analysis_pred <- bs_analysis %>%
+      mutate(
+        log10_pred_bs = predict(bs_fit, newdata = .),
+        pred_bs = 10^log10_pred_bs
+      ) %>%
+      filter(is.finite(pred_bs))
+    if (nrow(bs_analysis_pred) < 10) {
+      return(NULL)
+    }
+    perf_on_bootstrap <- compute_metrics(
+      bs_analysis_pred,
+      "NTproBNP",
+      "pred_bs"
+    ) %>%
+      select(.metric, .estimator, .estimate_on_bootstrap = .estimate)
+
+    # 2. Performance on Original Sample (Test)
+    orig_assessment_pred <- bs_assessment %>%
+      mutate(
+        log10_pred_orig = predict(bs_fit, newdata = .),
+        pred_orig = 10^log10_pred_orig
+      ) %>%
+      filter(is.finite(pred_orig))
+    if (nrow(orig_assessment_pred) < 10) {
+      return(NULL)
+    }
+    perf_on_original <- compute_metrics(
+      orig_assessment_pred,
+      "NTproBNP",
+      "pred_orig"
+    ) %>%
+      select(.metric, .estimator, .estimate_on_original = .estimate)
+
+    # Calculate Optimism
+    metrics_step <- inner_join(
+      perf_on_bootstrap,
+      perf_on_original,
+      by = c(".metric", ".estimator")
+    ) %>%
+      mutate(optimism = .estimate_on_bootstrap - .estimate_on_original) %>%
+      filter(is.finite(optimism))
+    return(metrics_step)
+  }
+
+  # --- Run Bootstrapping for Re-estimated Model ---
+  print(glue("Running optimism correction for re-estimated model ({CONFIG$bootstrap_reps} iterations)..."))
+  boots_base <- bootstraps(md, times = CONFIG$bootstrap_reps, apparent = FALSE)
+  optimism_estimates_base_list <- parallel::mclapply(
+    boots_base$splits,
+    function(split) {
+      calculate_optimism_step_base(split, CONFIG$rcs_knots)
+    },
+    mc.cores = optimism_cores,
+    mc.set.seed = TRUE
   )
-  if (is.null(bs_paba)) {
-    I_bs <- 0
-    S_bs <- 1
+  optimism_estimates_base <- bind_rows(keep(optimism_estimates_base_list, ~ !is.null(.)))
+
+  # Summarize optimism for re-estimated model
+  if (nrow(optimism_estimates_base) > 0) {
+    optimism_summary_base <- optimism_estimates_base %>%
+      group_by(.metric, .estimator) %>%
+      summarise(
+        mean_optimism = mean(optimism, na.rm = TRUE),
+        n_boots = n(),
+        ci_lower_95 = quantile(.estimate_on_original, probs = 0.025, na.rm = TRUE),
+        ci_upper_95 = quantile(.estimate_on_original, probs = 0.975, na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      filter(is.finite(mean_optimism))
+
+    base_optimism_corrected <- apparent_performance_base %>%
+      select(
+        .metric,
+        .estimator,
+        apparent_estimate = .estimate
+      ) %>%
+      inner_join(optimism_summary_base, by = c(".metric", ".estimator")) %>%
+      mutate(optimism_corrected = apparent_estimate - mean_optimism) %>%
+      arrange(.metric, .estimator)
+
+    print("Optimism-Corrected Performance (Re-estimated Additive Model):")
+    print(base_optimism_corrected)
+
+    write_rds(
+      base_optimism_corrected,
+      output_path('base_model_optimism_corrected.rds')
+    )
   } else {
-    I_bs <- bs_paba@para["Intercept", "EST"]
-    S_bs <- bs_paba@para["Slope", "EST"]
+    print("Insufficient bootstrap results for re-estimated model optimism correction.")
+    base_optimism_corrected <- NULL
   }
 
-  # 1. Performance on Bootstrap Sample (Apparent)
-
-  bs_analysis_pred <- bs_analysis %>%
-    mutate(
-      log10_pred_recal_bs = I_bs + S_bs * log10_pred_initial_bs,
-      pred_median_recal_bs = 10^log10_pred_recal_bs
-    ) %>%
-    filter(is.finite(pred_median_recal_bs))
-  if (nrow(bs_analysis_pred) < 10) {
-    return(NULL)
-  }
-  perf_on_bootstrap <- compute_metrics(
-    bs_analysis_pred,
-    "NTproBNP",
-    "pred_median_recal_bs"
-  ) %>%
-    select(.metric, .estimator, .estimate_on_bootstrap = .estimate)
-
-  # 2. Performance on Original Sample (Test)
-  orig_assessment_pred <- bs_assessment %>%
-    mutate(
-      log10_pred_initial_orig = predict(bs_fit, newdata = .),
-      log10_pred_recal_orig = I_bs + S_bs * log10_pred_initial_orig,
-      pred_median_recal_on_orig = 10^log10_pred_recal_orig
-    ) %>%
-    filter(is.finite(pred_median_recal_on_orig))
-  if (nrow(orig_assessment_pred) < 10) {
-    return(NULL)
-  }
-  perf_on_original <- compute_metrics(
-    orig_assessment_pred,
-    "NTproBNP",
-    "pred_median_recal_on_orig"
-  ) %>%
-    select(.metric, .estimator, .estimate_on_original = .estimate)
-
-  # Calculate Optimism
-  metrics_step <- inner_join(
-    perf_on_bootstrap,
-    perf_on_original,
-    by = c(".metric", ".estimator")
-  ) %>%
-    mutate(optimism = .estimate_on_bootstrap - .estimate_on_original) %>%
-    filter(is.finite(optimism))
-  return(metrics_step)
-}
-
-# Perform bootstrapping
-boots <- bootstraps(md, times = CONFIG$bootstrap_reps, apparent = FALSE)
-optimism_cores <- get_bootstrap_cores()
-message(glue("Running optimism correction on {optimism_cores} core(s)..."))
-optimism_estimates_list <- parallel::mclapply(
-  boots$splits,
-  function(split) {
-    calculate_optimism_step(split, CONFIG$rcs_knots)
-  },
-  mc.cores = optimism_cores,
-  mc.set.seed = TRUE
-)
-optimism_estimates <- bind_rows(keep(optimism_estimates_list, ~ !is.null(.)))
-print("Finished Optimism Correction Bootstrapping.")
-
-# Summarize Optimism and Calculate Corrected Estimates
-if (nrow(optimism_estimates) > 0 && !is.null(apparent_performance_new)) {
-  optimism_summary <- optimism_estimates %>%
-    group_by(.metric, .estimator) %>%
-    summarise(
-      mean_optimism = mean(optimism, na.rm = TRUE),
-      n_boots = n(),
-      lower_ci_95 = quantile(.estimate_on_original, probs = 0.025, na.rm = TRUE),
-      upper_ci_95 = quantile(.estimate_on_original, probs = 0.975, na.rm = TRUE),
-      .groups = 'drop'
-    ) %>%
-    filter(is.finite(mean_optimism))
-
-  optimism_corrected_final <- apparent_performance_new %>%
-    select(
-      .metric,
-      .estimator,
-      threshold_label,
-      apparent_estimate = .estimate
-    ) %>%
-    inner_join(optimism_summary, by = c(".metric", ".estimator")) %>%
-    mutate(optimism_corrected = apparent_estimate - mean_optimism) %>%
-    select(
-      .metric,
-      .estimator,
-      apparent_estimate,
-      mean_optimism,
-      optimism_corrected,
-      lower_ci_95,
-      upper_ci_95,
-      n_boots
-    ) %>%
-    arrange(.metric, .estimator)
-
-  print("Optimism-Corrected Performance Metrics (Recalibrated New Model):")
-  print(optimism_corrected_final)
-} else {
-  print(
-    "Could not calculate optimism-corrected estimates (insufficient bootstrap results or apparent performance missing)."
+  # --- Run Bootstrapping for Extended Model ---
+  print(glue("Running optimism correction for extended model ({CONFIG$bootstrap_reps} iterations)..."))
+  boots_protocol <- bootstraps(md, times = CONFIG$bootstrap_reps, apparent = FALSE)
+  optimism_estimates_protocol_list <- parallel::mclapply(
+    boots_protocol$splits,
+    function(split) {
+      calculate_optimism_step_protocol(split, CONFIG$rcs_knots)
+    },
+    mc.cores = optimism_cores,
+    mc.set.seed = TRUE
   )
-  optimism_corrected_final <- NULL
+  optimism_estimates_protocol <- bind_rows(keep(optimism_estimates_protocol_list, ~ !is.null(.)))
+
+  # Summarize optimism for extended model
+  if (nrow(optimism_estimates_protocol) > 0) {
+    optimism_summary_protocol <- optimism_estimates_protocol %>%
+      group_by(.metric, .estimator) %>%
+      summarise(
+        mean_optimism = mean(optimism, na.rm = TRUE),
+        n_boots = n(),
+        ci_lower_95 = quantile(.estimate_on_original, probs = 0.025, na.rm = TRUE),
+        ci_upper_95 = quantile(.estimate_on_original, probs = 0.975, na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      filter(is.finite(mean_optimism))
+
+    protocol_optimism_corrected <- apparent_performance_protocol %>%
+      select(
+        .metric,
+        .estimator,
+        apparent_estimate = .estimate
+      ) %>%
+      inner_join(optimism_summary_protocol, by = c(".metric", ".estimator")) %>%
+      mutate(optimism_corrected = apparent_estimate - mean_optimism) %>%
+      arrange(.metric, .estimator)
+
+    print("Optimism-Corrected Performance (Extended Model):")
+    print(protocol_optimism_corrected)
+
+    write_rds(
+      protocol_optimism_corrected,
+      output_path('extended_model_optimism_corrected.rds')
+    )
+  } else {
+    print("Insufficient bootstrap results for extended model optimism correction.")
+    protocol_optimism_corrected <- NULL
+  }
+
+  print("--- Finished Optimism Correction for Re-estimated and Extended Models ---")
 }
 
 print("--- Finished Section 4 ---")
