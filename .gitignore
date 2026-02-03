@@ -6,3 +6,7 @@
 .DS_Store
 .Rhistory
 .Rproj.user/
+
+# Local AI assistant config/instructions (do not commit)
+.claude/
+AGENTS.md
