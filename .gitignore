@@ -9,4 +9,8 @@
 
 # Local AI assistant config/instructions (do not commit)
 .claude/
+.omc/
 AGENTS.md
+
+# Obsolete local analysis artifact (not part of the reproducible outputs)
+assets/ntprobnp_mean_sd.rds

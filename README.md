@@ -30,6 +30,8 @@ BNP conversion/
 │   ├── 08_report.R           # Report generation
 │   └── main.R                # Orchestrator script
 ├── assets/                   # Output directory (plots, tables, report)
+├── checks/
+│   └── verify_release.R      # Cohort, event, and release-output checks
 ├── renv.lock                 # Package version lockfile
 └── BNP NTproBNP protocol.md  # Study protocol
 ```
@@ -38,7 +40,7 @@ BNP conversion/
 
 ### Prerequisites
 
-- R >= 4.0.0
+- R 4.5.2 (the version recorded in `renv.lock`)
 - RStudio (recommended)
 
 ### Setup
@@ -58,6 +60,10 @@ BNP conversion/
 
    This installs all dependencies with the exact versions recorded in `renv.lock`, ensuring reproducibility.
 
+### Private input data
+
+Patient-level CSV, Excel, and Word files are intentionally excluded from version control. Place the current `BNP Data Analysis Jan 9 2025.csv` in the project root before running the analysis.
+
 ## Running the Analysis
 
 From the project root directory in R:
@@ -67,6 +73,12 @@ source("R/main.R")
 ```
 
 This executes all analysis scripts in order and produces outputs in the `assets/` directory.
+
+For the current locked analysis dataset, the expected model cohort is 448 participants. The secondary outcome cohort contains 423 participants, including 20 events. After running the analysis, verify the release outputs with:
+
+```r
+source("checks/verify_release.R")
+```
 
 ### Configuration
 
@@ -84,7 +96,8 @@ Key parameters can be modified in `R/00_config.R`:
 ## Outputs
 
 ### Report
-- `assets/analysis_report.docx` — Publication-ready Word document with all tables and figures
+- `assets/analysis_report.Rmd` — Reproducible methods and results report source
+- `assets/analysis_report.docx` — Generated internal Word report (not tracked)
 
 ### Figures
 | File | Description |
@@ -92,7 +105,7 @@ Key parameters can be modified in `R/00_config.R`:
 | `calibration_plot_kasahara_log.png` | Kasahara model calibration (log scale) |
 | `calibration_plot_kasahara_recal_ols_loglog.png` | Recalibrated model calibration |
 | `BA_kasahara_*.png` | Bland-Altman plots (relative and absolute error) |
-| `outcome_assoc_combined.png` | Biomarker-outcome association curves |
+| `outcome_assoc_combined.png` | Biomarker-outcome curves with matched NT-proBNP x-axis ranges and complete confidence bands |
 
 ### Data Files (.rds)
 | File | Description |
@@ -101,6 +114,8 @@ Key parameters can be modified in `R/00_config.R`:
 | `kasahara_recal_optimism_corrected.rds` | Optimism-corrected performance metrics |
 | `nested_model_comparison.rds` | Likelihood ratio test results |
 | `bnp_threshold_sensitivity.rds` | Derived BNP thresholds by patient profile |
+| `ntprobnp_cat_summary.rds` | Measured NT-proBNP outcome counts by category |
+| `pred_cat_summary.rds` | Predicted NT-proBNP outcome counts by category |
 
 ## Statistical Methods
 
@@ -160,7 +175,3 @@ Input data should contain the following variables:
 
 - Kasahara S, et al. Conversion formula from B-type natriuretic peptide to N-terminal proBNP values in patients with cardiovascular diseases. *Int J Cardiol*. 2019;280:184-189.
 - Duceppe E, et al. Preoperative N-Terminal Pro-B-Type Natriuretic Peptide and Cardiovascular Events After Noncardiac Surgery. *Ann Intern Med*. 2020;172(12):843.
-
-## Contact
-
-the author of the package

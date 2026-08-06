@@ -446,19 +446,6 @@ if (nrow(logit_md) < 30) {
       logit_md$pred_ntprobnp_new_median
     )
   )
-  x_ranges_valid <- x_ranges[!vapply(x_ranges, is.null, logical(1))]
-  x_axis_limits <- if (length(x_ranges_valid) > 0) {
-    range(unlist(x_ranges_valid), na.rm = TRUE)
-  } else {
-    NULL
-  }
-  if (
-    !is.null(x_axis_limits) &&
-      (!all(is.finite(x_axis_limits)) ||
-        x_axis_limits[1] >= x_axis_limits[2])
-  ) {
-    x_axis_limits <- NULL
-  }
 
   contrast_dfs <- list()
   outcome_spline_n <- list()
@@ -542,22 +529,6 @@ if (nrow(logit_md) < 30) {
     }
   )
 
-  y_axis_limits <- NULL
-  if (length(contrast_dfs) > 0) {
-    y_axis_limits <- range(
-      unlist(lapply(contrast_dfs, function(df) c(df$lower, df$upper))),
-      1,
-      na.rm = TRUE
-    )
-    if (
-      !all(is.finite(y_axis_limits)) ||
-        y_axis_limits[1] <= 0 ||
-        y_axis_limits[1] >= y_axis_limits[2]
-    ) {
-      y_axis_limits <- NULL
-    }
-  }
-
   if (length(contrast_dfs) >= 2) {
     combined_df <- bind_rows(contrast_dfs)
     combined_colors <- setNames(
@@ -575,9 +546,45 @@ if (nrow(logit_md) < 30) {
         )
       )
 
-    # Create separate x-axis breaks: NT-proBNP panels use 0-4000, BNP uses free scale
-    # Using explicit breaks that will show appropriately in each panel
-    ntprobnp_breaks <- c(0, 1000, 2000, 3000, 4000)
+    ntprobnp_panels <- unlist(
+      plot_labels[c("NTproBNP", "pred_ntprobnp_new_median")]
+    )
+    ntprobnp_shared_max <- max(
+      combined_df$x[combined_df$variable %in% ntprobnp_panels],
+      na.rm = TRUE
+    )
+    panel_axis_data <- combined_df %>%
+      group_by(variable) %>%
+      dplyr::summarize(x = max(x, na.rm = TRUE), .groups = "drop") %>%
+      mutate(
+        x = if_else(
+          variable %in% ntprobnp_panels,
+          ntprobnp_shared_max,
+          x
+        )
+      ) %>%
+      bind_rows(
+        tibble(
+          variable = levels(combined_df$variable),
+          x = 0
+        )
+      ) %>%
+      mutate(
+        variable = factor(
+          variable,
+          levels = levels(combined_df$variable)
+        ),
+        y = 1
+      )
+
+    y_axis_breaks <- c(1, 5, 10, 20, 40, 100, 200, 400, 1000)
+    max_upper_ci <- max(combined_df$upper, na.rm = TRUE)
+    upper_break_candidates <- y_axis_breaks[y_axis_breaks > max_upper_ci]
+    y_axis_upper <- if (length(upper_break_candidates) > 0) {
+      min(upper_break_candidates)
+    } else {
+      10^ceiling(log10(max_upper_ci))
+    }
 
     p_combined <- ggplot(
       combined_df,
@@ -591,6 +598,11 @@ if (nrow(logit_md) < 30) {
         group = variable
       )
     ) +
+      geom_blank(
+        data = panel_axis_data,
+        aes(x = x, y = y),
+        inherit.aes = FALSE
+      ) +
       geom_ribbon(alpha = 0.15, color = NA, show.legend = FALSE) +
       geom_line(linewidth = PLOT_STYLE$line_width, show.legend = FALSE) +
       geom_hline(
@@ -599,11 +611,10 @@ if (nrow(logit_md) < 30) {
         color = PLOT_STYLE$colors$neutral
       ) +
       scale_y_log10(
-        breaks = c(1, 5, 10, 20, 40, 100),
+        breaks = y_axis_breaks[y_axis_breaks <= y_axis_upper],
         labels = scales::label_number(accuracy = 1)
       ) +
       scale_x_continuous(
-        breaks = ntprobnp_breaks,
         labels = scales::label_number(accuracy = 1, big.mark = ","),
         expand = expansion(mult = c(0.03, 0.06))
       ) +
@@ -615,7 +626,7 @@ if (nrow(logit_md) < 30) {
         y = "Odds Ratio"
       ) +
       my_theme +
-      coord_cartesian(ylim = c(1, 100)) +
+      coord_cartesian(ylim = c(1, y_axis_upper)) +
       theme(
         strip.text = element_text(size = rel(0.95)),
         axis.text.x = element_text(angle = 0, hjust = 0.5),

@@ -40,7 +40,7 @@ set_na_str_safe <- function(ft, na_str = '') {
   }
   ft
 }
-format_table <- function(df, caption, digits = 2, font_size = 9, drop_model_type = TRUE) {
+format_table <- function(df, caption, digits = 2, font_size = 9, drop_model_type = TRUE, keep_together = FALSE) {
   if (drop_model_type && 'model_type' %in% names(df)) {
     df <- dplyr::select(df, -model_type)
   }
@@ -61,8 +61,27 @@ format_table <- function(df, caption, digits = 2, font_size = 9, drop_model_type
   ft <- flextable::set_caption(ft, caption = caption)
   ft <- flextable::fontsize(ft, size = font_size, part = 'all')
   ft <- flextable::autofit(ft)
+  ft <- flextable::fit_to_width(ft, max_width = 6.5, unit = 'in')
+  ft <- flextable::set_table_properties(
+    ft,
+    layout = 'fixed',
+    opts_word = list(split = TRUE, keep_with_next = FALSE, repeat_headers = TRUE)
+  )
+  ft <- flextable::paginate(ft, init = keep_together, hdr_ftr = TRUE)
   ft <- set_na_str_safe(ft, na_str = '')
   ft
+}
+rename_outcome_model_columns <- function(df) {
+  column_names <- names(df)
+  column_names <- dplyr::case_when(
+    grepl('^Firth Logistic Regression.*Est', column_names) ~ 'Firth OR (95% CI)',
+    grepl('^Firth Logistic Regression.*p', column_names) ~ 'Firth p',
+    grepl('^Logistic Regression.*Est', column_names) ~ 'GLM OR (95% CI)',
+    grepl('^Logistic Regression.*p', column_names) ~ 'GLM p',
+    TRUE ~ column_names
+  )
+  names(df) <- column_names
+  df
 }
 add_reference_row <- function(tbl, model, var, term_col = 'term', ref_label = NULL, digits = 2) {
   if (!is.data.frame(tbl) || is.null(model)) {
@@ -314,6 +333,13 @@ if (!is.null(baseline_table_final)) {
   ft <- gtsummary::as_flex_table(baseline_table_final)
   ft <- flextable::fontsize(ft, size = 8, part = 'all')
   ft <- flextable::autofit(ft)
+  ft <- flextable::fit_to_width(ft, max_width = 6.5, unit = 'in')
+  ft <- flextable::set_table_properties(
+    ft,
+    layout = 'fixed',
+    opts_word = list(split = TRUE, keep_with_next = FALSE, repeat_headers = TRUE)
+  )
+  ft <- flextable::paginate(ft, init = FALSE, hdr_ftr = TRUE)
   ft
 } else {
   cat('Baseline table not available in memory.\n')
@@ -399,7 +425,7 @@ page_break()
 ```
 
 # Kasahara Model Recalibration
-The Kasahara model shows systematic miscalibration (overprediction) when applied to this study cohort. A simple log-log linear recalibration can correct this bias using only two parameters.
+The Kasahara model shows systematic miscalibration (underprediction) when applied to this study cohort. A simple log-log linear recalibration can correct this bias using only two parameters.
 
 ## Recalibration approach
 Recalibration uses an intercept ($I$; calibration-in-the-large) and slope ($S$; calibration slope) on the log10 scale. Perfect calibration corresponds to $I=0$ and $S=1$. The full implementable conversion equation is shown once in the Final full conversion equation section.
@@ -643,6 +669,8 @@ page_break()
 Logistic regression models evaluate associations between biomarker categories and the 30-day composite outcome.
 
 ## Logistic regression models (categorical predictors)
+The outcome cohort is restricted to participants in the complete-case conversion-model cohort with nonmissing MINS30 and vascular_death. Missing outcomes are not imputed.
+
 The composite outcome is defined as 1 if MINS30 == 1 or vascular_death == 1, and 0 otherwise. For each categorical biomarker, we fit:
 $$
 \operatorname{logit}\{P(outcome=1)\} = a_0 + \sum_{j=2}^{4} a_j \; I(Category=j)
@@ -662,6 +690,22 @@ $$
 where $g(\cdot)$ is a restricted cubic spline with 3 knots for $X$ equal to measured NT-proBNP, measured BNP, or predicted NT-proBNP. The plotted curves show odds ratios relative to the 25th percentile of $X$ with 95% confidence bands.
 
 ## Results
+
+```{r outcome-cohort-summary, results='asis'}
+outcome_counts_path <- file.path(params$output_dir, 'ntprobnp_cat_summary.rds')
+if (file.exists(outcome_counts_path)) {
+  outcome_counts <- readr::read_rds(outcome_counts_path)
+  outcome_n <- sum(outcome_counts$n)
+  outcome_events <- sum(outcome_counts$events)
+  cat(sprintf(
+    'The secondary outcome analysis included %s participants with complete model covariates and outcome data; %s experienced MINS or vascular death.\n',
+    scales::comma(outcome_n),
+    scales::comma(outcome_events)
+  ))
+} else {
+  cat('Outcome cohort summary not available.\n')
+}
+```
 
 ```{r table-outcome-a}
 model_a_glm <- get_obj('model_a_glm')
@@ -692,12 +736,13 @@ if (!is.null(model_a_glm) && !is.null(model_a_firth)) {
   ref_row <- as.list(rep(NA, ncol(tbl_a)))
   names(ref_row) <- names(tbl_a)
   ref_row$term <- '<100 (reference)'
-  estimate_cols <- grep('estimate', names(tbl_a), ignore.case = TRUE, value = TRUE)
+  estimate_cols <- grep('estimate|/ Est', names(tbl_a), ignore.case = TRUE, value = TRUE)
   if (length(estimate_cols) > 0) ref_row[estimate_cols] <- '1.00 [1.00, 1.00]'
   tbl_a <- dplyr::bind_rows(ref_row, tbl_a)
   tbl_a <- tbl_a %>%
     dplyr::select(-dplyr::any_of('part')) %>%
     dplyr::rename(`NT-proBNP Category` = term)
+  tbl_a <- rename_outcome_model_columns(tbl_a)
   counts_path_a <- file.path(params$output_dir, 'ntprobnp_cat_summary.rds')
   if (file.exists(counts_path_a)) {
     counts_a <- readr::read_rds(counts_path_a) %>%
@@ -722,7 +767,8 @@ if (!is.null(model_a_glm) && !is.null(model_a_firth)) {
     'Association between measured NT-proBNP categories and the composite outcome (odds ratios).',
     digits = 3,
     font_size = 8,
-    drop_model_type = FALSE
+    drop_model_type = FALSE,
+    keep_together = TRUE
   )
 } else {
   cat('Measured NT-proBNP category outcome model not available.\n')
@@ -762,12 +808,13 @@ if (!is.null(model_c_glm) && !is.null(model_c_firth)) {
   ref_row <- as.list(rep(NA, ncol(tbl_c)))
   names(ref_row) <- names(tbl_c)
   ref_row$term <- '<100 (reference)'
-  estimate_cols <- grep('estimate', names(tbl_c), ignore.case = TRUE, value = TRUE)
+  estimate_cols <- grep('estimate|/ Est', names(tbl_c), ignore.case = TRUE, value = TRUE)
   if (length(estimate_cols) > 0) ref_row[estimate_cols] <- '1.00 [1.00, 1.00]'
   tbl_c <- dplyr::bind_rows(ref_row, tbl_c)
   tbl_c <- tbl_c %>%
     dplyr::select(-dplyr::any_of('part')) %>%
     dplyr::rename(`Predicted NT-proBNP Category` = term)
+  tbl_c <- rename_outcome_model_columns(tbl_c)
   counts_path_c <- file.path(params$output_dir, 'pred_cat_summary.rds')
   if (file.exists(counts_path_c)) {
     counts_c <- readr::read_rds(counts_path_c) %>%
@@ -792,7 +839,8 @@ if (!is.null(model_c_glm) && !is.null(model_c_firth)) {
     'Association between predicted NT-proBNP categories (recalibrated model) and the composite outcome (odds ratios).',
     digits = 3,
     font_size = 8,
-    drop_model_type = FALSE
+    drop_model_type = FALSE,
+    keep_together = TRUE
   )
 } else {
   cat('Predicted NT-proBNP category outcome model not available.\n')
@@ -803,7 +851,7 @@ if (!is.null(model_c_glm) && !is.null(model_c_firth)) {
 page_break()
 ```
 
-```{r fig-outcome-combined, fig.cap='Associations of measured BNP, measured NT-proBNP, and predicted NT-proBNP with outcome (spline models; shared y-axis with panel-specific x scales).'}
+```{r fig-outcome-combined, fig.cap='Associations of measured BNP, measured NT-proBNP, and predicted NT-proBNP with outcome (spline models; shared y-axis; measured and predicted NT-proBNP use the same x-axis range).'}
 knitr::include_graphics(file.path(params$output_dir, 'outcome_assoc_combined.png'))
 ```
 

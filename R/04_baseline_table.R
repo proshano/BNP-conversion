@@ -204,8 +204,24 @@ missing_counts_text <- names(missing_counts[missing_counts > 0]) %>%
   } %>%
   paste(collapse = "; ")
 
+model_covariates_for_missingness <- intersect(
+  c("Age", "Sex", "BMI", "CrCl", "Hb_gdl", "BNP", "NTproBNP", "AF"),
+  names(data_for_table1)
+)
+n_missing_model_covariates <- sum(
+  !complete.cases(data_for_table1[, model_covariates_for_missingness])
+)
+
 missing_footnote_text <- if (nchar(missing_counts_text) > 0) {
-  paste("Number missing: ", missing_counts_text)
+  paste0(
+    "Missing observations by variable: ",
+    missing_counts_text,
+    ". Of the ",
+    nrow(data_for_table1),
+    " participants, ",
+    n_missing_model_covariates,
+    " were missing at least one variable required by the conversion model."
+  )
 } else {
   "No missing data for variables shown."
 }

@@ -6,7 +6,6 @@ required_packages <- c(
   "tidyverse",
   "nephro",
   "mcr",
-  "santoku",
   "rms",
   "yardstick",
   "rsample",
